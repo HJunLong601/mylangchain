@@ -1,0 +1,6 @@
+LangChain 学习笔记：
+
+1. 模型负责推理和生成。
+2. Tool 是给模型调用的外部能力。
+3. Agent 会根据问题决定是否调用工具。
+4. 先跑通最小例子，再继续学 memory、RAG 和 LangGraph。
