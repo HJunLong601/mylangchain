@@ -6,7 +6,7 @@ from dotenv import load_dotenv
 from langchain.agents import create_agent
 from langchain_openai import ChatOpenAI
 
-from app.tools import get_current_time, read_local_note
+from app.tools import get_current_time, get_weather_by_city, read_local_note
 
 
 # 这是给模型的系统提示词。
@@ -83,7 +83,7 @@ def build_agent():
     # tools 里传入的就是普通 Python 函数，LangChain 会把它们注册成模型可调用的工具。
     return create_agent(
         model=model,
-        tools=[get_current_time, read_local_note],
+        tools=[get_current_time, read_local_note, get_weather_by_city],
         system_prompt=SYSTEM_PROMPT,
     )
 
