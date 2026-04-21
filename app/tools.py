@@ -12,6 +12,10 @@ from zoneinfo import ZoneInfo
 # 计算项目根目录，后面读取 data 文件时会用到。
 ROOT_DIR = Path(__file__).resolve().parent.parent
 DATA_DIR = ROOT_DIR / "data"
+# Open-Meteo 拆成两个接口：
+# 1. geocoding-api: 城市名 -> 经纬度
+# 2. forecast-api: 经纬度 -> 天气数据
+# 这样设计很适合教学，因为你能清楚看到“工具内部也可以是多步流程”。
 GEOCODING_API_URL = "https://geocoding-api.open-meteo.com/v1/search"
 FORECAST_API_URL = "https://api.open-meteo.com/v1/forecast"
 
@@ -49,6 +53,7 @@ WEATHER_CODE_DESCRIPTIONS = {
 
 def fetch_json(url: str, params: dict[str, str]) -> dict:
     """请求 JSON 接口并返回解析后的字典。"""
+    # urlencode 会把参数字典拼成标准查询字符串，避免手写 URL 出错。
     query = urlencode(params)
     request_url = f"{url}?{query}"
 
@@ -63,6 +68,7 @@ def fetch_json(url: str, params: dict[str, str]) -> dict:
 
 def format_location_name(location: dict) -> str:
     """把地理编码结果整理成更容易读的地点名称。"""
+    # 这里把城市、州/省、国家拼起来，是为了让重名城市更容易区分。
     parts = [
         location.get("name"),
         location.get("admin1"),
@@ -73,6 +79,8 @@ def format_location_name(location: dict) -> str:
 
 def describe_weather_code(code: int | None) -> str:
     """把 Open-Meteo 的天气代码转成中文描述。"""
+    # 天气接口返回的是数字代码，人类不容易直接读懂。
+    # 这一步相当于把“机器字段”转换成“用户能理解的文本”。
     if code is None:
         return "未知天气"
     return WEATHER_CODE_DESCRIPTIONS.get(code, f"未知天气代码 {code}")
@@ -146,6 +154,8 @@ def get_weather_by_city(city: str) -> str:
     if not city:
         return "城市名不能为空。"
 
+    # 第一步：根据城市名查经纬度。
+    # 因为天气接口通常需要坐标，而用户输入的往往是自然语言城市名。
     try:
         geocoding_data = fetch_json(
             GEOCODING_API_URL,
@@ -163,12 +173,15 @@ def get_weather_by_city(city: str) -> str:
     if not results:
         return f"没有找到城市：{city}。请尝试使用更完整的城市名。"
 
+    # 当前示例只取第一条匹配结果，目的是先把流程跑通。
+    # 如果以后要做得更完整，可以把多个候选地点返回给用户选择。
     location = results[0]
     latitude = location["latitude"]
     longitude = location["longitude"]
     timezone_name = location.get("timezone", "auto")
     display_name = format_location_name(location)
 
+    # 第二步：拿到坐标后，再去查当前天气。
     try:
         forecast_data = fetch_json(
             FORECAST_API_URL,
@@ -189,6 +202,7 @@ def get_weather_by_city(city: str) -> str:
     if not current:
         return f"暂时无法获取 {display_name} 的天气数据。"
 
+    # 第三步：把原始天气字段提取出来，并转换成更适合用户阅读的形式。
     weather_code = current.get("weather_code")
     weather_text = describe_weather_code(weather_code)
     time_text = current.get("time", "未知时间")
@@ -198,6 +212,7 @@ def get_weather_by_city(city: str) -> str:
     precipitation = current.get("precipitation", "未知")
     wind_speed = current.get("wind_speed_10m", "未知")
 
+    # 第四步：把结果整理成一段清晰、稳定的文本，交给模型继续组织最终回答。
     return (
         f"{display_name} 当前天气如下：\n"
         f"- 观测时间：{time_text}\n"
