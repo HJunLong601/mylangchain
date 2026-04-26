@@ -30,6 +30,10 @@ class AssistantStructuredReply(BaseModel):
     used_tools: list[str] = Field(
         description="本轮回答中实际使用过的工具名列表；如果没有使用工具则返回空列表。"
     )
+    sources: list[str] = Field(
+        default_factory=list,
+        description="本轮回答引用到的来源文件列表；如果没有引用知识库内容则返回空列表。"
+    )
     follow_up_suggestions: list[str] = Field(
         description="建议用户下一步可继续追问的方向。"
     )
@@ -43,5 +47,6 @@ class AssistantStructuredReply(BaseModel):
 # 1. answer: 给人看，是最终自然语言结论
 # 2. key_points: 给程序或 UI 做列表展示
 # 3. used_tools: 帮助你理解这一轮到底调用了什么能力
-# 4. follow_up_suggestions: 让 agent 更像“可继续交互的助手”
-# 5. caution: 单独承载风险提示，避免和 answer 混在一起
+# 4. sources: 让 RAG 回答能带上来源，方便追溯“答案是从哪里来的”
+# 5. follow_up_suggestions: 让 agent 更像“可继续交互的助手”
+# 6. caution: 单独承载风险提示，避免和 answer 混在一起

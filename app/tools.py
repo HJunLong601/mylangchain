@@ -8,6 +8,8 @@ from urllib.parse import urlencode
 from urllib.request import urlopen
 from zoneinfo import ZoneInfo
 
+from app.rag import format_search_results, list_knowledge_file_paths, search_knowledge
+
 
 # 计算项目根目录，后面读取 data 文件时会用到。
 ROOT_DIR = Path(__file__).resolve().parent.parent
@@ -223,3 +225,50 @@ def get_weather_by_city(city: str) -> str:
         f"- 降水：{precipitation} mm\n"
         f"- 风速：{wind_speed} km/h"
     )
+
+
+def list_knowledge_base_files() -> str:
+    """
+    列出当前本地知识库里的可检索文件。
+
+    注意事项：
+    - 当前最小 RAG 版本只检索 data 目录下的 .txt 和 .md 文件。
+    - 这个工具适合在回答前先让 agent 了解“知识库里有哪些材料”。
+    - 如果你新加了知识文件，下一次调用时这个工具会自动看到它们。
+    """
+    file_paths = list_knowledge_file_paths()
+    if not file_paths:
+        return "当前知识库为空。请先在 data 目录中放入 .txt 或 .md 文件。"
+
+    lines = ["当前本地知识库文件如下："]
+    for path in file_paths:
+        lines.append(f"- {path.name}")
+
+    return "\n".join(lines)
+
+
+def search_local_knowledge(query: str, max_results: int = 3) -> str:
+    """
+    在本地知识库中检索与问题最相关的文本片段。
+
+    注意事项：
+    - 这是当前项目的最小 RAG 工具：先检索，再把相关片段交给模型组织最终答案。
+    - 它不是直接给最终结论，而是返回“可能有帮助的证据片段”。
+    - query 应该尽量是明确问题，例如“LangChain 里的 Tool 是什么”。
+    - max_results 建议保持较小，避免一次返回过多片段让上下文变乱。
+    """
+    query = query.strip()
+    if not query:
+        return "检索问题不能为空。"
+
+    if max_results <= 0:
+        return "max_results 必须大于 0。"
+
+    results = search_knowledge(query=query, max_results=max_results)
+    if not results:
+        return (
+            "没有在本地知识库中找到相关内容。"
+            "你可以换一种问法，或者先用 list_knowledge_base_files 查看有哪些文件。"
+        )
+
+    return format_search_results(results)

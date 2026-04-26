@@ -9,7 +9,13 @@ from langchain.agents.structured_output import ToolStrategy
 from langchain_openai import ChatOpenAI
 
 from app.schemas import AssistantStructuredReply
-from app.tools import get_current_time, get_weather_by_city, read_local_note
+from app.tools import (
+    get_current_time,
+    get_weather_by_city,
+    list_knowledge_base_files,
+    read_local_note,
+    search_local_knowledge,
+)
 
 
 # 这是给模型的系统提示词。
@@ -28,6 +34,8 @@ SYSTEM_PROMPT = """
 You are a beginner-friendly AI assistant for learning LangChain.
 Use tools when they help.
 When you answer, explain briefly and clearly in Chinese unless the user asks otherwise.
+If a question is about local notes, learning materials, or knowledge-base content, prefer using knowledge search tools first.
+When you answer based on retrieved knowledge, mention the source file names when possible.
 """.strip()
 
 
@@ -110,7 +118,13 @@ def build_agent():
     # 这个模式下，agent 的目标是给用户返回一段自然语言回答。
     return create_agent(
         model=model,
-        tools=[get_current_time, read_local_note, get_weather_by_city],
+        tools=[
+            get_current_time,
+            read_local_note,
+            get_weather_by_city,
+            list_knowledge_base_files,
+            search_local_knowledge,
+        ],
         system_prompt=SYSTEM_PROMPT,
     )
 
@@ -123,7 +137,13 @@ def build_structured_agent():
     # 而是认真把 schema 要求的每个字段都填完整。
     return create_agent(
         model=model,
-        tools=[get_current_time, read_local_note, get_weather_by_city],
+        tools=[
+            get_current_time,
+            read_local_note,
+            get_weather_by_city,
+            list_knowledge_base_files,
+            search_local_knowledge,
+        ],
         system_prompt=(
             SYSTEM_PROMPT
             + "\nWhen structured output mode is enabled, fill every field carefully."

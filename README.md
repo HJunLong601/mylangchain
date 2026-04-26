@@ -75,22 +75,30 @@ python -m app.main
 - `读取 notes.txt 并帮我总结一下`
 - `上海今天天气怎么样？`
 - `帮我查一下北京的实时天气`
+- `列出当前知识库文件`
+- `RAG 是什么？`
+- `根据本地知识库解释一下为什么需要 RAG`
 - `/json 上海今天天气怎么样？`
+- `/json 根据本地知识库总结 RAG 的核心流程`
 - `/json 读取 notes.txt 后帮我生成三个学习建议`
 - `先读 notes.txt，再告诉我下一步应该学什么`
 
 ## 5. 这个项目里有什么
 
-`app/tools.py` 里现在放了三个工具：
+`app/tools.py` 里现在放了五个工具：
 
 - `get_current_time()`：返回指定时区的当前时间
 - `read_local_note()`：读取 `data/` 目录下的 txt 文件
 - `get_weather_by_city()`：查询指定城市的当前天气
+- `list_knowledge_base_files()`：列出本地知识库文件
+- `search_local_knowledge()`：在本地知识库中检索相关片段
 
 `app/main.py` 里完成了最小 agent 的初始化和调用。
 
 天气工具默认使用 Open-Meteo 的公开接口，不需要额外配置天气 API Key，适合入门学习。
 结构化输出模式使用 Pydantic schema 约束返回字段，适合继续往“可被程序消费”的方向演进。
+本地 RAG 模块会读取 `data/` 目录下的 `.txt` 和 `.md` 文件，切分文本后做最小检索，再把相关片段交给模型生成答案。
+当前检索器是“教学版最小实现”，使用关键词重叠评分，不依赖 embedding 和向量数据库，方便你先理解 RAG 主流程。
 
 如果你想看“新建一个工具应该怎么写”，可以直接打开：
 
@@ -107,9 +115,9 @@ python -m app.main
 建议按这个顺序继续扩展：
 
 1. 先看懂 `build_agent()` 是怎么把模型和工具接起来的
-2. 自己新增一个工具，比如“读取待办事项”或“查询天气”
-3. 给 agent 增加结构化输出
-4. 再进入 RAG 和 LangGraph
+2. 看懂 `app/rag.py` 里“文档加载 -> 切分 -> 检索”的最小 RAG 流程
+3. 自己新增一个工具，比如“读取待办事项”或“查询天气”
+4. 再进入更正式的 embedding / 向量数据库 / LangGraph
 
 ## 7. 常见问题
 
