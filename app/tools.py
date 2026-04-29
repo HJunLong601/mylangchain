@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from datetime import datetime
 from pathlib import Path
 from urllib.error import HTTPError, URLError
@@ -9,6 +10,17 @@ from urllib.request import urlopen
 from zoneinfo import ZoneInfo
 
 from app.rag import format_search_results, list_knowledge_file_paths, search_knowledge
+
+
+LOGGER = logging.getLogger("app.tools")
+if not LOGGER.handlers:
+    handler = logging.StreamHandler()
+    handler.setFormatter(
+        logging.Formatter("[TOOLS] %(levelname)s: %(message)s")
+    )
+    LOGGER.addHandler(handler)
+LOGGER.setLevel(logging.INFO)
+LOGGER.propagate = False
 
 
 # 计算项目根目录，后面读取 data 文件时会用到。
@@ -238,8 +250,13 @@ def list_knowledge_base_files() -> str:
     """
     file_paths = list_knowledge_file_paths()
     if not file_paths:
+        LOGGER.info("请求列出知识库文件，但当前没有可用文件")
         return "当前知识库为空。请先在 data 目录中放入 .txt 或 .md 文件。"
 
+    LOGGER.info(
+        "列出知识库文件 -> %s",
+        [path.name for path in file_paths],
+    )
     lines = ["当前本地知识库文件如下："]
     for path in file_paths:
         lines.append(f"- {path.name}")
@@ -252,10 +269,12 @@ def search_local_knowledge(query: str, max_results: int = 3) -> str:
     在本地知识库中检索与问题最相关的文本片段。
 
     注意事项：
-    - 这是当前项目的最小 RAG 工具：先检索，再把相关片段交给模型组织最终答案。
+    - 这是当前项目的向量 RAG 检索工具：先把问题转成 embedding，再做语义相似度搜索。
     - 它不是直接给最终结论，而是返回“可能有帮助的证据片段”。
     - query 应该尽量是明确问题，例如“LangChain 里的 Tool 是什么”。
     - max_results 建议保持较小，避免一次返回过多片段让上下文变乱。
+    - 这个函数返回的是普通字符串；LangChain 收到后会把它包装成 ToolMessage，
+      然后再交还给模型继续生成最终回答。
     """
     query = query.strip()
     if not query:
@@ -264,11 +283,18 @@ def search_local_knowledge(query: str, max_results: int = 3) -> str:
     if max_results <= 0:
         return "max_results 必须大于 0。"
 
+    LOGGER.info(
+        "调用 search_local_knowledge query=%r max_results=%s",
+        query,
+        max_results,
+    )
     results = search_knowledge(query=query, max_results=max_results)
     if not results:
+        LOGGER.info("search_local_knowledge 没有命中任何结果")
         return (
             "没有在本地知识库中找到相关内容。"
             "你可以换一种问法，或者先用 list_knowledge_base_files 查看有哪些文件。"
         )
 
+    LOGGER.info("search_local_knowledge 命中结果数=%s", len(results))
     return format_search_results(results)

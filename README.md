@@ -45,6 +45,8 @@ pip install -r requirements.txt
 ZAI_API_KEY=你的智谱密钥
 ZAI_BASE_URL=https://open.bigmodel.cn/api/paas/v4/
 MODEL_NAME=glm-5.1
+EMBEDDING_MODEL=embedding-3
+EMBEDDING_DIMENSIONS=1024
 ```
 
 如果你后面想切到其他兼容 OpenAI API 的模型，也可以继续使用：
@@ -78,6 +80,7 @@ python -m app.main
 - `列出当前知识库文件`
 - `RAG 是什么？`
 - `根据本地知识库解释一下为什么需要 RAG`
+- `根据本地知识库解释 RAG 和微调有什么区别`
 - `/json 上海今天天气怎么样？`
 - `/json 根据本地知识库总结 RAG 的核心流程`
 - `/json 读取 notes.txt 后帮我生成三个学习建议`
@@ -97,8 +100,8 @@ python -m app.main
 
 天气工具默认使用 Open-Meteo 的公开接口，不需要额外配置天气 API Key，适合入门学习。
 结构化输出模式使用 Pydantic schema 约束返回字段，适合继续往“可被程序消费”的方向演进。
-本地 RAG 模块会读取 `data/` 目录下的 `.txt` 和 `.md` 文件，切分文本后做最小检索，再把相关片段交给模型生成答案。
-当前检索器是“教学版最小实现”，使用关键词重叠评分，不依赖 embedding 和向量数据库，方便你先理解 RAG 主流程。
+本地 RAG 模块会读取 `data/` 目录下的 `.txt` 和 `.md` 文件，切分文本后调用 embedding 模型生成向量，再放进 LangChain 的 `InMemoryVectorStore` 做语义检索。
+当前版本已经进入“真正的向量检索”阶段，但仍然保持最小实现：向量库存放在内存里，适合学习，不适合大规模持久化场景。
 
 如果你想看“新建一个工具应该怎么写”，可以直接打开：
 
@@ -115,9 +118,9 @@ python -m app.main
 建议按这个顺序继续扩展：
 
 1. 先看懂 `build_agent()` 是怎么把模型和工具接起来的
-2. 看懂 `app/rag.py` 里“文档加载 -> 切分 -> 检索”的最小 RAG 流程
-3. 自己新增一个工具，比如“读取待办事项”或“查询天气”
-4. 再进入更正式的 embedding / 向量数据库 / LangGraph
+2. 看懂 `app/rag.py` 里“文档加载 -> 切分 -> embedding -> 向量库 -> 检索”的最小向量 RAG 流程
+3. 自己新增知识文件，观察检索结果怎么变化
+4. 再进入更正式的持久化向量数据库 / LangGraph
 
 ## 7. 常见问题
 

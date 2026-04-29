@@ -76,6 +76,27 @@ def format_structured_response(data: AssistantStructuredReply) -> str:
     )
 
 
+def print_new_tool_messages(new_messages: list) -> None:
+    """
+    打印本轮新增的 ToolMessage 内容。
+
+    这个函数的目的，是把“工具返回给模型看的内容”单独展示出来。
+    对学习 Agent / RAG 很有帮助，因为你能直接观察：
+    - 工具到底返回了什么
+    - 返回的是自然语言、结构化文本，还是检索片段
+    - 模型后续的最终回答是不是建立在这些内容之上
+    """
+    for message in new_messages:
+        message_type = getattr(message, "type", "")
+        if message_type != "tool":
+            continue
+
+        tool_name = getattr(message, "name", "unknown_tool")
+        content = getattr(message, "content", "")
+        print(f"\nToolMessage [{tool_name}]:\n")
+        print(format_message_content(content))
+
+
 def build_model() -> ChatOpenAI:
     """读取配置并创建模型对象，供不同模式复用。"""
     # 从 .env 文件加载环境变量，这样我们就不用把密钥直接写在代码里。
@@ -203,9 +224,13 @@ def main() -> None:
         # 注意：即使是 /json 模式，真正存进消息历史里的也是“去掉命令前缀后的问题正文”。
         # 这样可以避免把 /json 当成用户语义的一部分污染后续上下文。
         messages.append({"role": "user", "content": normalized_input})
+        previous_message_count = len(messages)
 
         # 第四步：把完整历史消息传给 agent，这样模型就能记住上下文。
         # 普通模式和结构化模式的切换点就在这里。
+        # 如果模型在这一轮决定调用 search_local_knowledge 之类的工具，
+        # LangChain 会先执行工具函数，再把工具返回值包装成 ToolMessage 放回消息链，
+        # 然后模型会继续读取这条 ToolMessage，最后产出面向用户的 AIMessage。
         current_agent = structured_agent if use_structured_output else agent
         result = current_agent.invoke({"messages": messages})
 
@@ -214,10 +239,20 @@ def main() -> None:
         # - AIMessage: 模型的回答，或者模型准备调用工具时的请求
         # - ToolMessage: 工具执行后的结果
         # 如果本轮没有调用工具，可能就只有 HumanMessage + AIMessage。
+        # 如果本轮调用了 RAG 检索工具，那么 ToolMessage 里放的就是
+        # “命中的知识片段整理文本”，而不是向量本身。
         updated_messages = result.get("messages", [])
         if not updated_messages:
             print(result)
             continue
+
+        # 这里只取“本轮新增的消息”，避免把前几轮已经出现过的 ToolMessage 重复打印。
+        # 常见新增内容可能是：
+        # - AIMessage: 模型发起工具调用请求
+        # - ToolMessage: 工具执行结果
+        # - AIMessage: 模型基于工具结果给出的最终回答
+        new_messages = updated_messages[previous_message_count:]
+        print_new_tool_messages(new_messages)
 
         # 用最新消息列表覆盖本地历史，保证下一轮还能延续上下文。
         # 这里很关键：不是简单地只追加最后一句，而是直接用 LangChain 返回的完整消息链覆盖。
