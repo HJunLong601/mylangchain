@@ -1,33 +1,40 @@
 from __future__ import annotations
 
+import json
 import logging
 import os
+import shutil
 from pathlib import Path
 
 from dotenv import load_dotenv
 from langchain_core.documents import Document
-from langchain_core.vectorstores import InMemoryVectorStore
+from langchain_chroma import Chroma
 from langchain_openai import OpenAIEmbeddings
 
 
 # 这里单独定义 RAG 使用的数据目录和可支持的文件类型。
-# 当前版本是“最小向量检索版 RAG”：
+# 当前版本是“持久化向量检索版 RAG”：
 # - 文档来源：data 目录下的 .txt / .md 文件
 # - 文本切分：手写的固定窗口切分
 # - 向量模型：通过 OpenAI 兼容接口接入智谱 embedding 模型
-# - 向量库：LangChain 提供的 InMemoryVectorStore
+# - 向量库：Chroma，本地持久化到磁盘目录
 #
-# 这条链路已经非常接近真实项目，只是向量库存储仍然放在内存里，
-# 适合本地学习和小型 demo，不适合生产环境持久化。
+# 和上一版 InMemoryVectorStore 相比，这一版最大的变化是：
+# - 向量索引会落盘
+# - 下次启动进程可以复用已有索引
+# - 更接近真实项目里的“索引构建”和“索引加载”流程
 ROOT_DIR = Path(__file__).resolve().parent.parent
 DATA_DIR = ROOT_DIR / "data"
 KNOWLEDGE_EXTENSIONS = {".txt", ".md"}
+DEFAULT_VECTOR_DIR = ROOT_DIR / ".rag_chroma"
+DEFAULT_COLLECTION_NAME = "mylangchain_knowledge"
+SIGNATURE_FILE_NAME = "knowledge_signature.json"
 
 
 # 下面这几个模块级变量用于做“懒加载缓存”。
-# 含义是：第一次真的用到 RAG 检索时，我们才去构建 embedding 模型和向量库；
-# 后续如果 data 目录内容没变，就直接复用，避免每次问答都重新向量化整套文档。
-_VECTOR_STORE_CACHE: InMemoryVectorStore | None = None
+# 含义是：第一次真的用到 RAG 检索时，我们才去加载或构建 Chroma 向量库；
+# 后续同一进程内如果 data 目录内容没变，就直接复用这个 Chroma 实例。
+_VECTOR_STORE_CACHE: Chroma | None = None
 _VECTOR_STORE_SIGNATURE: tuple[tuple[str, int], ...] | None = None
 
 
@@ -100,6 +107,107 @@ def get_knowledge_signature() -> tuple[tuple[str, int], ...]:
     )
     LOGGER.info("当前知识库签名: %s", signature)
     return signature
+
+
+def get_vector_store_dir() -> Path:
+    """
+    获取 Chroma 持久化目录。
+
+    默认目录是项目根目录下的 .rag_chroma。
+    也可以通过环境变量 RAG_VECTOR_DIR 自定义，例如：
+    RAG_VECTOR_DIR=.rag_chroma
+
+    这里做一次路径解析，后续清理和写入都基于绝对路径，避免误删其他目录。
+    """
+    load_dotenv()
+
+    configured_dir = os.getenv("RAG_VECTOR_DIR", "").strip()
+    if configured_dir:
+        path = Path(configured_dir)
+        if not path.is_absolute():
+            path = ROOT_DIR / path
+    else:
+        path = DEFAULT_VECTOR_DIR
+
+    return path.resolve()
+
+
+def get_collection_name() -> str:
+    """获取 Chroma collection 名称。"""
+    load_dotenv()
+    return os.getenv("RAG_COLLECTION_NAME", DEFAULT_COLLECTION_NAME).strip()
+
+
+def get_signature_file_path(vector_store_dir: Path) -> Path:
+    """获取用于保存知识库签名的文件路径。"""
+    return vector_store_dir / SIGNATURE_FILE_NAME
+
+
+def read_persisted_signature(
+    vector_store_dir: Path,
+) -> tuple[tuple[str, int], ...] | None:
+    """
+    读取上一次构建索引时保存的知识库签名。
+
+    如果签名文件存在且和当前 data 目录一致，说明磁盘上的 Chroma 索引仍然可复用。
+    如果签名不同，就说明知识库文件变了，需要重建索引。
+    """
+    signature_path = get_signature_file_path(vector_store_dir)
+    if not signature_path.exists():
+        LOGGER.info("未发现持久化签名文件: %s", signature_path)
+        return None
+
+    try:
+        raw_signature = json.loads(signature_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        LOGGER.info("持久化签名文件解析失败，将重建索引: %s", signature_path)
+        return None
+
+    signature = tuple(
+        (str(item[0]), int(item[1]))
+        for item in raw_signature
+    )
+    LOGGER.info("读取到持久化知识库签名: %s", signature)
+    return signature
+
+
+def write_persisted_signature(
+    vector_store_dir: Path,
+    signature: tuple[tuple[str, int], ...],
+) -> None:
+    """
+    保存当前知识库签名。
+
+    Chroma 会负责保存向量数据；这个签名文件是我们自己额外保存的，
+    用来判断下次启动时是否需要重建索引。
+    """
+    vector_store_dir.mkdir(parents=True, exist_ok=True)
+    signature_path = get_signature_file_path(vector_store_dir)
+    signature_path.write_text(
+        json.dumps(list(signature), ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    LOGGER.info("已写入知识库签名: %s", signature_path)
+
+
+def reset_vector_store_dir(vector_store_dir: Path) -> None:
+    """
+    清空 Chroma 持久化目录。
+
+    只有当知识库文件发生变化时才会调用这里。
+    为了避免误删，必须确认目标目录在当前项目根目录下面。
+    """
+    resolved_dir = vector_store_dir.resolve()
+    resolved_root = ROOT_DIR.resolve()
+
+    if resolved_dir == resolved_root or resolved_root not in resolved_dir.parents:
+        raise RuntimeError(
+            f"拒绝清空非项目目录下的向量库路径: {resolved_dir}"
+        )
+
+    if resolved_dir.exists():
+        LOGGER.info("清空旧的 Chroma 持久化目录: %s", resolved_dir)
+        shutil.rmtree(resolved_dir)
 
 
 def load_knowledge_documents() -> list[Document]:
@@ -293,24 +401,51 @@ def build_embeddings_model() -> OpenAIEmbeddings:
     return OpenAIEmbeddings(**model_kwargs)
 
 
-def build_vector_store() -> InMemoryVectorStore:
+def open_persisted_vector_store(
+    embeddings: OpenAIEmbeddings,
+    vector_store_dir: Path,
+) -> Chroma:
     """
-    构建一个内存向量库。
+    打开已经存在的 Chroma 向量库。
+
+    这里不会重新向量化文档，只是把磁盘上的 collection 加载进来，
+    所以速度比重建索引快很多。
+    """
+    LOGGER.info(
+        "加载已有 Chroma 向量库 collection=%s dir=%s",
+        get_collection_name(),
+        vector_store_dir,
+    )
+    return Chroma(
+        collection_name=get_collection_name(),
+        embedding_function=embeddings,
+        persist_directory=str(vector_store_dir),
+    )
+
+
+def build_vector_store(
+    *,
+    current_signature: tuple[tuple[str, int], ...],
+    vector_store_dir: Path,
+    embeddings: OpenAIEmbeddings,
+) -> Chroma:
+    """
+    构建一个可持久化的 Chroma 向量库。
 
     整个向量检索流程在这里真正串起来：
     1. 读取原始文档
     2. 文本切分
     3. 调用 Embeddings 模型把每个分片转成向量
-    4. 把向量和原始文本一起放进 InMemoryVectorStore
+    4. 把向量和原始文本一起写入 Chroma
+    5. 保存知识库签名，方便下次启动复用索引
 
-    为什么选 InMemoryVectorStore：
-    - LangChain 官方直接支持
-    - 代码量小
-    - 特别适合本地 demo 和学习
+    为什么选 Chroma：
+    - 本地启动简单
+    - 支持 persist_directory 落盘
+    - 很适合作为从 demo 走向生产前的过渡方案
 
-    它的局限也很明确：
-    - 数据只存在内存里，进程结束就没了
-    - 不适合大规模数据
+    它仍然不是最终生产形态：
+    - 大规模、多租户、高并发场景通常会考虑 Qdrant、Milvus、pgvector 等组件
     """
     documents = load_knowledge_documents()
     if not documents:
@@ -320,31 +455,42 @@ def build_vector_store() -> InMemoryVectorStore:
 
     chunked_documents = split_documents_into_chunks(documents)
     LOGGER.info(
-        "开始构建内存向量库 documents=%s chunked_documents=%s",
+        "开始构建 Chroma 持久化向量库 documents=%s chunked_documents=%s dir=%s collection=%s",
         len(documents),
         len(chunked_documents),
+        vector_store_dir,
+        get_collection_name(),
     )
-    embeddings = build_embeddings_model()
 
-    vector_store = InMemoryVectorStore(embedding=embeddings)
+    reset_vector_store_dir(vector_store_dir)
+    vector_store_dir.mkdir(parents=True, exist_ok=True)
+
+    vector_store = Chroma(
+        collection_name=get_collection_name(),
+        embedding_function=embeddings,
+        persist_directory=str(vector_store_dir),
+    )
     vector_store.add_documents(chunked_documents)
-    LOGGER.info("内存向量库构建完成")
+    write_persisted_signature(vector_store_dir, current_signature)
+    LOGGER.info("Chroma 持久化向量库构建完成")
     return vector_store
 
 
-def get_vector_store() -> InMemoryVectorStore:
+def get_vector_store() -> Chroma:
     """
     获取当前可用的向量库，并在需要时自动重建。
 
     这是整个模块里很实用的一层封装：
-    - 第一次检索时：自动构建向量库
-    - 后续检索时：如果知识文件没变，就直接复用
-    - 如果知识文件变了：自动重建向量库
+    - 同一进程内：优先复用内存里的 Chroma 实例
+    - 重启进程后：如果知识库签名没变，就加载磁盘上的 Chroma 索引
+    - 如果知识文件变了：清空旧索引并重建
     """
     global _VECTOR_STORE_CACHE
     global _VECTOR_STORE_SIGNATURE
 
     current_signature = get_knowledge_signature()
+    vector_store_dir = get_vector_store_dir()
+
     if (
         _VECTOR_STORE_CACHE is not None
         and _VECTOR_STORE_SIGNATURE == current_signature
@@ -352,8 +498,23 @@ def get_vector_store() -> InMemoryVectorStore:
         LOGGER.info("命中向量库缓存，直接复用已有索引")
         return _VECTOR_STORE_CACHE
 
-    LOGGER.info("未命中向量库缓存，开始重建索引")
-    _VECTOR_STORE_CACHE = build_vector_store()
+    embeddings = build_embeddings_model()
+    persisted_signature = read_persisted_signature(vector_store_dir)
+
+    if persisted_signature == current_signature:
+        LOGGER.info("知识库签名未变化，复用磁盘上的 Chroma 索引")
+        _VECTOR_STORE_CACHE = open_persisted_vector_store(
+            embeddings=embeddings,
+            vector_store_dir=vector_store_dir,
+        )
+    else:
+        LOGGER.info("知识库签名发生变化，开始重建 Chroma 索引")
+        _VECTOR_STORE_CACHE = build_vector_store(
+            current_signature=current_signature,
+            vector_store_dir=vector_store_dir,
+            embeddings=embeddings,
+        )
+
     _VECTOR_STORE_SIGNATURE = current_signature
     return _VECTOR_STORE_CACHE
 
@@ -372,7 +533,7 @@ def clear_vector_store_cache() -> None:
 
     _VECTOR_STORE_CACHE = None
     _VECTOR_STORE_SIGNATURE = None
-    LOGGER.info("已清空向量库缓存")
+    LOGGER.info("已清空当前进程内的向量库缓存")
 
 
 def search_knowledge(
@@ -410,7 +571,7 @@ def search_knowledge(
 
 def format_search_results(results: list[Document]) -> str:
     """
-    把检索结果格式化成适合 agent 使用的文本。
+    把检索结果格式化成适合模型阅读的文本。
 
     注意这里返回的仍然不是“最终答案”，而是“证据片段”。
     模型看到这些片段后，还需要再做最后一步：
@@ -418,12 +579,17 @@ def format_search_results(results: list[Document]) -> str:
     - 参考片段内容
     - 组织成适合用户阅读的回答
 
-    这里也是“向量命中后如何传给 agent”的关键节点：
+    当前默认走“直接 Prompt 版 RAG”，所以链路是：
     1. similarity_search(...) 先返回一组 Document 分片
     2. format_search_results(...) 把这些 Document 整理成一段纯文本
-    3. search_local_knowledge() 把这段文本作为工具返回值交给 LangChain
-    4. LangChain 会把这份工具返回值包装成 ToolMessage，放回 messages
-    5. 模型读取这条 ToolMessage 后，再生成最终 AIMessage
+    3. main.build_direct_rag_prompt(...) 把这段文本拼进本轮用户 Prompt
+    4. 模型直接从 HumanMessage 内容里读取这些参考资料
+    5. 模型基于“参考资料 + 用户问题”生成最终 AIMessage
+
+    对比上一版工具调用模式：
+    - 工具版：检索结果通过 ToolMessage 传给模型
+    - Prompt 版：检索结果直接拼进用户 Prompt 传给模型
+    两者最后都会进入模型上下文，区别主要是“谁负责触发检索”和“消息结构长什么样”。
     """
     if not results:
         return "没有检索到相关知识片段。"

@@ -47,6 +47,8 @@ ZAI_BASE_URL=https://open.bigmodel.cn/api/paas/v4/
 MODEL_NAME=glm-5.1
 EMBEDDING_MODEL=embedding-3
 EMBEDDING_DIMENSIONS=1024
+RAG_VECTOR_DIR=.rag_chroma
+RAG_COLLECTION_NAME=mylangchain_knowledge
 ```
 
 如果你后面想切到其他兼容 OpenAI API 的模型，也可以继续使用：
@@ -88,20 +90,21 @@ python -m app.main
 
 ## 5. 这个项目里有什么
 
-`app/tools.py` 里现在放了五个工具：
+`app/tools.py` 里现在放了五个工具，其中前四个默认注册给 agent 使用：
 
 - `get_current_time()`：返回指定时区的当前时间
 - `read_local_note()`：读取 `data/` 目录下的 txt 文件
 - `get_weather_by_city()`：查询指定城市的当前天气
 - `list_knowledge_base_files()`：列出本地知识库文件
-- `search_local_knowledge()`：在本地知识库中检索相关片段
+- `search_local_knowledge()`：保留的工具版 RAG 示例，方便对比 ToolMessage 写法
 
-`app/main.py` 里完成了最小 agent 的初始化和调用。
+`app/main.py` 里完成了最小 agent 的初始化和调用，并在调用模型前主动执行本地 RAG 检索。
 
 天气工具默认使用 Open-Meteo 的公开接口，不需要额外配置天气 API Key，适合入门学习。
 结构化输出模式使用 Pydantic schema 约束返回字段，适合继续往“可被程序消费”的方向演进。
-本地 RAG 模块会读取 `data/` 目录下的 `.txt` 和 `.md` 文件，切分文本后调用 embedding 模型生成向量，再放进 LangChain 的 `InMemoryVectorStore` 做语义检索。
-当前版本已经进入“真正的向量检索”阶段，但仍然保持最小实现：向量库存放在内存里，适合学习，不适合大规模持久化场景。
+本地 RAG 模块会读取 `data/` 目录下的 `.txt` 和 `.md` 文件，切分文本后调用 embedding 模型生成向量，再放进 Chroma 做语义检索。
+当前版本已经支持本地持久化，默认会把向量索引保存到 `.rag_chroma/`，下次启动时如果知识库文件没有变化，会直接复用已有索引。
+默认 RAG 链路已经改成直接 Prompt 形式：程序先检索知识库，再把命中的片段拼进本轮用户消息中，模型不会再通过 `ToolMessage` 接收知识库内容。
 
 如果你想看“新建一个工具应该怎么写”，可以直接打开：
 
@@ -118,9 +121,9 @@ python -m app.main
 建议按这个顺序继续扩展：
 
 1. 先看懂 `build_agent()` 是怎么把模型和工具接起来的
-2. 看懂 `app/rag.py` 里“文档加载 -> 切分 -> embedding -> 向量库 -> 检索”的最小向量 RAG 流程
+2. 看懂 `app/rag.py` 里“文档加载 -> 切分 -> embedding -> Chroma 持久化向量库 -> 检索”的 RAG 流程
 3. 自己新增知识文件，观察检索结果怎么变化
-4. 再进入更正式的持久化向量数据库 / LangGraph
+4. 再进入更正式的生产向量数据库 / LangGraph
 
 ## 7. 常见问题
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 
 from dotenv import load_dotenv
@@ -8,14 +9,34 @@ from langchain.agents import create_agent
 from langchain.agents.structured_output import ToolStrategy
 from langchain_openai import ChatOpenAI
 
+from app.rag import format_search_results, search_knowledge
 from app.schemas import AssistantStructuredReply
 from app.tools import (
     get_current_time,
     get_weather_by_city,
     list_knowledge_base_files,
     read_local_note,
-    search_local_knowledge,
 )
+
+
+# main 模块自己的日志，主要用来观察“直接 Prompt RAG”这条链路。
+# 之前 RAG 通过 ToolMessage 返回时，你能在终端看到 ToolMessage；
+# 现在改成直接拼 Prompt 后，我们用日志把“检索 -> 拼 Prompt -> 调模型”的过程展示出来。
+LOGGER = logging.getLogger("app.main")
+if not LOGGER.handlers:
+    handler = logging.StreamHandler()
+    handler.setFormatter(
+        logging.Formatter("[MAIN] %(levelname)s: %(message)s")
+    )
+    LOGGER.addHandler(handler)
+LOGGER.setLevel(logging.INFO)
+LOGGER.propagate = False
+
+
+# 直接 Prompt RAG 每次最多塞入多少个检索片段。
+# 数量太少：可能漏掉重要上下文。
+# 数量太多：Prompt 会变长，成本更高，也更容易干扰模型。
+DIRECT_RAG_MAX_RESULTS = 3
 
 
 # 这是给模型的系统提示词。
@@ -34,7 +55,8 @@ SYSTEM_PROMPT = """
 You are a beginner-friendly AI assistant for learning LangChain.
 Use tools when they help.
 When you answer, explain briefly and clearly in Chinese unless the user asks otherwise.
-If a question is about local notes, learning materials, or knowledge-base content, prefer using knowledge search tools first.
+If the user's message contains local knowledge-base context, treat it as retrieved reference material.
+When local knowledge-base context is relevant, answer based on that context first.
 When you answer based on retrieved knowledge, mention the source file names when possible.
 """.strip()
 
@@ -76,15 +98,81 @@ def format_structured_response(data: AssistantStructuredReply) -> str:
     )
 
 
+def build_direct_rag_prompt(
+    user_question: str,
+    max_results: int = DIRECT_RAG_MAX_RESULTS,
+) -> str:
+    """
+    构建“直接 Prompt 版 RAG”的用户消息。
+
+    之前的 Agent 工具版 RAG 是这样传递知识库内容的：
+    用户问题 -> 模型决定调用工具 -> 工具返回知识片段 -> LangChain 生成 ToolMessage -> 模型读取 ToolMessage
+
+    现在改成更常见的普通 RAG Chain 写法：
+    用户问题 -> 程序先检索知识库 -> 把知识片段直接拼进 Prompt -> 模型基于这个 Prompt 回答
+
+    也就是说：
+    - 检索动作由我们的 Python 代码主动执行，不再等模型自己决定是否调用 RAG 工具。
+    - 检索结果会成为本轮 HumanMessage 的一部分，而不是 ToolMessage。
+    - 好处是链路更简单、更可控；代价是每轮都会先检索，Prompt 也会变长。
+    """
+    question = user_question.strip()
+    if not question:
+        return user_question
+
+    LOGGER.info(
+        "直接 Prompt RAG: 开始检索 query=%r max_results=%s",
+        question,
+        max_results,
+    )
+    results = search_knowledge(query=question, max_results=max_results)
+    LOGGER.info("直接 Prompt RAG: 检索完成 hits=%s", len(results))
+
+    # format_search_results(...) 会把 Document 分片整理成人类和模型都容易读的文本。
+    # 这里得到的 retrieved_context 会被直接拼到 Prompt 里，
+    # 所以模型看到它时，并不知道“这是工具消息”，只会把它当成本轮输入的一部分。
+    retrieved_context = format_search_results(results)
+
+    prompt = f"""
+你正在使用“直接 Prompt 版 RAG”回答问题。
+
+请遵守这些规则：
+1. 优先根据【本地知识库检索结果】回答。
+2. 如果检索结果和用户问题明显无关，要明确说明“知识库里没有找到直接相关内容”。
+3. 如果使用了检索结果，请尽量带上来源文件名。
+4. 不要编造知识库中没有出现的来源。
+
+【本地知识库检索结果】
+{retrieved_context}
+
+【用户问题】
+{question}
+""".strip()
+
+    LOGGER.info(
+        "直接 Prompt RAG: 已生成增强 Prompt chars=%s context_chars=%s",
+        len(prompt),
+        len(retrieved_context),
+    )
+    LOGGER.info(
+        "直接 Prompt RAG: 即将发送给模型的本轮 Prompt 如下\n%s",
+        prompt,
+    )
+    return prompt
+
+
 def print_new_tool_messages(new_messages: list) -> None:
     """
     打印本轮新增的 ToolMessage 内容。
 
     这个函数的目的，是把“工具返回给模型看的内容”单独展示出来。
-    对学习 Agent / RAG 很有帮助，因为你能直接观察：
+    对学习 Agent 工具调用很有帮助，因为你能直接观察：
     - 工具到底返回了什么
     - 返回的是自然语言、结构化文本，还是检索片段
     - 模型后续的最终回答是不是建立在这些内容之上
+
+    注意：当前默认 RAG 已经改成“直接 Prompt 版”，所以知识库内容不会再从这里打印。
+    如果这里还能看到 ToolMessage，通常来自天气、时间、列文件等其他工具。
     """
     for message in new_messages:
         message_type = getattr(message, "type", "")
@@ -137,6 +225,8 @@ def build_agent():
     # create_agent 会把“模型 + 工具 + 系统提示词”组装成一个可调用的 agent。
     # tools 里传入的就是普通 Python 函数，LangChain 会把它们注册成模型可调用的工具。
     # 这个模式下，agent 的目标是给用户返回一段自然语言回答。
+    # 注意：这里不再注册 search_local_knowledge。
+    # 因为当前 RAG 已经改成“先检索，再直接拼 Prompt”，不需要模型通过工具调用获取知识库内容。
     return create_agent(
         model=model,
         tools=[
@@ -144,7 +234,6 @@ def build_agent():
             read_local_note,
             get_weather_by_city,
             list_knowledge_base_files,
-            search_local_knowledge,
         ],
         system_prompt=SYSTEM_PROMPT,
     )
@@ -163,7 +252,6 @@ def build_structured_agent():
             read_local_note,
             get_weather_by_city,
             list_knowledge_base_files,
-            search_local_knowledge,
         ],
         system_prompt=(
             SYSTEM_PROMPT
@@ -195,6 +283,8 @@ def main() -> None:
     # - tool: 工具返回，对应 ToolMessage
     # system 提示词这次没有手动放进列表里，而是通过 create_agent(..., system_prompt=...)
     # 交给 LangChain 管理，所以你在 messages 变量里通常先看到的是 user / assistant / tool。
+    # 当前 RAG 采用直接 Prompt 形式，所以本地知识库检索结果会被拼到 user 消息里，
+    # 不再额外产生 search_local_knowledge 对应的 ToolMessage。
     messages: list[dict[str, str]] = []
 
     print("多轮对话已开启，输入 exit 或 quit 结束。")
@@ -219,28 +309,34 @@ def main() -> None:
             print("请在 /json 后面输入问题。")
             continue
 
-        # 第三步：把用户问题追加到历史消息中。
+        # 第三步：先做本地知识库检索，再把检索结果直接拼进本轮用户 Prompt。
+        # 这是“直接 Prompt 版 RAG”的核心改动。
+        # normalized_input 是用户真正输入的问题；
+        # rag_prompt 是增强后的问题，里面包含“检索结果 + 用户问题 + 回答规则”。
+        rag_prompt = build_direct_rag_prompt(normalized_input)
+
+        # 第四步：把增强后的用户问题追加到历史消息中。
         # 这里的 role='user' 是最常见的消息类型之一，表示这条消息来自用户。
         # 注意：即使是 /json 模式，真正存进消息历史里的也是“去掉命令前缀后的问题正文”。
         # 这样可以避免把 /json 当成用户语义的一部分污染后续上下文。
-        messages.append({"role": "user", "content": normalized_input})
+        # 当前版本为了方便观察，存进去的是已经拼好知识库上下文的 rag_prompt。
+        # 这也意味着多轮对话时，历史里会保留每轮当时检索到的上下文。
+        messages.append({"role": "user", "content": rag_prompt})
         previous_message_count = len(messages)
 
-        # 第四步：把完整历史消息传给 agent，这样模型就能记住上下文。
+        # 第五步：把完整历史消息传给 agent，这样模型就能记住上下文。
         # 普通模式和结构化模式的切换点就在这里。
-        # 如果模型在这一轮决定调用 search_local_knowledge 之类的工具，
-        # LangChain 会先执行工具函数，再把工具返回值包装成 ToolMessage 放回消息链，
-        # 然后模型会继续读取这条 ToolMessage，最后产出面向用户的 AIMessage。
+        # RAG 内容已经在上一步进入了 Prompt，所以这里不会再通过 ToolMessage 传递知识库内容。
+        # 不过如果模型需要查询时间、天气或列出知识库文件，它仍然可以调用其他工具。
         current_agent = structured_agent if use_structured_output else agent
         result = current_agent.invoke({"messages": messages})
 
-        # 第五步：LangChain 会返回更新后的完整消息列表，里面通常会包含：
+        # 第六步：LangChain 会返回更新后的完整消息列表，里面通常会包含：
         # - HumanMessage: 本轮用户输入
         # - AIMessage: 模型的回答，或者模型准备调用工具时的请求
         # - ToolMessage: 工具执行后的结果
         # 如果本轮没有调用工具，可能就只有 HumanMessage + AIMessage。
-        # 如果本轮调用了 RAG 检索工具，那么 ToolMessage 里放的就是
-        # “命中的知识片段整理文本”，而不是向量本身。
+        # 当前默认 RAG 不走工具，所以不会再出现“RAG 检索结果 ToolMessage”。
         updated_messages = result.get("messages", [])
         if not updated_messages:
             print(result)

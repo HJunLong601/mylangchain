@@ -273,8 +273,10 @@ def search_local_knowledge(query: str, max_results: int = 3) -> str:
     - 它不是直接给最终结论，而是返回“可能有帮助的证据片段”。
     - query 应该尽量是明确问题，例如“LangChain 里的 Tool 是什么”。
     - max_results 建议保持较小，避免一次返回过多片段让上下文变乱。
-    - 这个函数返回的是普通字符串；LangChain 收到后会把它包装成 ToolMessage，
-      然后再交还给模型继续生成最终回答。
+    - 当前默认主流程已经改成“直接 Prompt 版 RAG”，不会再把这个函数注册给 agent。
+    - 保留这个函数是为了方便你对比两种写法：
+      工具版 RAG 会把返回字符串包装成 ToolMessage；
+      Prompt 版 RAG 会把检索结果直接拼进 HumanMessage。
     """
     query = query.strip()
     if not query:
