@@ -50,6 +50,8 @@ EMBEDDING_DIMENSIONS=1024
 RAG_VECTOR_DIR=.rag_chroma
 RAG_COLLECTION_NAME=mylangchain_knowledge
 RAG_MAX_DISTANCE=1.2
+RAG_QUERY_REWRITE_ENABLED=true
+RAG_REWRITE_HISTORY_MESSAGES=6
 ```
 
 如果你后面想切到其他兼容 OpenAI API 的模型，也可以继续使用：
@@ -107,6 +109,7 @@ python -m app.main
 当前版本已经支持本地持久化，默认会把向量索引保存到 `.rag_chroma/`，下次启动时如果知识库文件没有变化，会直接复用已有索引。
 默认 RAG 链路已经改成直接 Prompt 形式：程序先检索知识库，再把命中的片段拼进本轮用户消息中，模型不会再通过 `ToolMessage` 接收知识库内容。
 检索时会打印每个 chunk 的 `distance` 和 `relevance_score`，并用 `RAG_MAX_DISTANCE` 过滤低相关结果。`distance` 越小越相关，超过阈值的 chunk 不会进入 Prompt。
+检索前还会执行 Query Rewrite：程序会参考最近几条历史，把“它和微调有什么区别？”这类上下文问题改写成更适合检索的独立问题，例如“RAG 和微调有什么区别？”。
 
 如果你想看“新建一个工具应该怎么写”，可以直接打开：
 
@@ -123,10 +126,11 @@ python -m app.main
 建议按这个顺序继续扩展：
 
 1. 先看懂 `build_agent()` 是怎么把模型和工具接起来的
-2. 看懂 `app/rag.py` 里“文档加载 -> 切分 -> embedding -> Chroma 持久化向量库 -> 带分数检索 -> 阈值过滤”的 RAG 流程
-3. 自己新增知识文件，观察 `distance` 和 `relevance_score` 怎么变化
-4. 调整 `RAG_MAX_DISTANCE`，观察哪些 chunk 会进入 Prompt
-5. 再进入更正式的生产向量数据库 / LangGraph
+2. 看懂 `app/main.py` 里“原始问题 -> Query Rewrite -> 检索 query -> 直接 Prompt”的链路
+3. 看懂 `app/rag.py` 里“文档加载 -> 切分 -> embedding -> Chroma 持久化向量库 -> 带分数检索 -> 阈值过滤”的 RAG 流程
+4. 自己新增知识文件，观察 `distance` 和 `relevance_score` 怎么变化
+5. 调整 `RAG_MAX_DISTANCE`，观察哪些 chunk 会进入 Prompt
+6. 再进入更正式的生产向量数据库 / LangGraph
 
 ## 7. 常见问题
 

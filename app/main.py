@@ -37,6 +37,8 @@ LOGGER.propagate = False
 # 数量太少：可能漏掉重要上下文。
 # 数量太多：Prompt 会变长，成本更高，也更容易干扰模型。
 DIRECT_RAG_MAX_RESULTS = 3
+DEFAULT_RAG_QUERY_REWRITE_ENABLED = True
+DEFAULT_RAG_REWRITE_HISTORY_MESSAGES = 6
 
 
 # 这是给模型的系统提示词。
@@ -83,6 +85,18 @@ def format_message_content(content) -> str:
     return str(content)
 
 
+def clean_user_text(text: str) -> str:
+    """
+    清理用户输入里的边界空白和 BOM 字符。
+
+    正常手动输入时一般不会遇到 BOM。
+    但在 Windows PowerShell 里用 here-string 或管道喂数据时，
+    第一行偶尔会带上 \ufeff，导致日志里看到奇怪的隐藏字符。
+    这里统一清掉，避免影响 Query Rewrite 和向量检索。
+    """
+    return text.lstrip("\ufeff").strip()
+
+
 def format_structured_response(data: AssistantStructuredReply) -> str:
     """把结构化输出格式化成终端里更好读的 JSON 文本。"""
     # model_dump() 会把 Pydantic 对象转成普通字典。
@@ -98,8 +112,260 @@ def format_structured_response(data: AssistantStructuredReply) -> str:
     )
 
 
+def env_bool(name: str, default: bool) -> bool:
+    """
+    从环境变量读取布尔开关。
+
+    Python 的 os.getenv(...) 返回的是字符串，而不是 bool。
+    所以这里统一支持几种常见写法：
+    - true / 1 / yes / on: 开启
+    - false / 0 / no / off: 关闭
+
+    如果环境变量没有配置，就使用 default。
+    """
+    raw_value = os.getenv(name)
+    if raw_value is None:
+        return default
+
+    normalized_value = raw_value.strip().lower()
+    if normalized_value in {"true", "1", "yes", "on"}:
+        return True
+    if normalized_value in {"false", "0", "no", "off"}:
+        return False
+
+    raise ValueError(f"{name} 必须是布尔值，当前值为: {raw_value}")
+
+
+def env_int(name: str, default: int) -> int:
+    """
+    从环境变量读取整数。
+
+    这里用于控制 Query Rewrite 参考多少条历史消息。
+    消息太少：可能无法理解“它、这个、上面那个”指什么。
+    消息太多：改写 prompt 会变长，成本更高。
+    """
+    raw_value = os.getenv(name)
+    if raw_value is None:
+        return default
+
+    try:
+        value = int(raw_value.strip())
+    except ValueError as exc:
+        raise ValueError(f"{name} 必须是整数，当前值为: {raw_value}") from exc
+
+    if value < 0:
+        raise ValueError(f"{name} 不能小于 0。")
+
+    return value
+
+
+def extract_original_user_question(content: str) -> str:
+    """
+    从直接 Prompt RAG 的增强 Prompt 里取回原始用户问题。
+
+    当前 main.py 存进 messages 的 user 内容不是原始问题，
+    而是“检索结果 + 回答规则 + 用户问题”组成的增强 Prompt。
+    如果 Query Rewrite 直接读取这段增强 Prompt，会把知识片段也当成历史用户输入，
+    反而污染改写效果。
+
+    所以这里做一个小清洗：
+    - 如果发现【用户问题】标记，就只取它后面的原始问题
+    - 如果没有这个标记，说明这不是 RAG 增强 Prompt，就原样返回
+    """
+    marker = "【用户问题】"
+    if marker not in content:
+        return content.strip()
+
+    return clean_user_text(content.split(marker, maxsplit=1)[1])
+
+
+def get_message_role(message) -> str:
+    """
+    从 LangChain 消息对象或普通 dict 中提取角色。
+
+    当前项目里 messages 可能混合两种形态：
+    - 我们手动追加的 dict: {"role": "user", "content": "..."}
+    - LangChain 返回的消息对象: HumanMessage / AIMessage / ToolMessage
+
+    为了让 Query Rewrite 能稳定读取历史，这里统一做一层兼容。
+    """
+    if isinstance(message, dict):
+        return str(message.get("role", ""))
+
+    message_type = getattr(message, "type", "")
+    if message_type == "human":
+        return "user"
+    if message_type == "ai":
+        return "assistant"
+    if message_type == "tool":
+        return "tool"
+
+    return str(message_type)
+
+
+def get_message_content(message) -> str:
+    """从 LangChain 消息对象或普通 dict 中提取文本内容。"""
+    if isinstance(message, dict):
+        return format_message_content(message.get("content", ""))
+
+    return format_message_content(getattr(message, "content", ""))
+
+
+def format_recent_history_for_rewrite(
+    messages: list,
+    max_messages: int,
+) -> str:
+    """
+    整理最近几条对话历史，供 Query Rewrite 使用。
+
+    注意这里不是把完整 messages 原样塞给改写模型。
+    原因有两个：
+    - 历史里可能包含很长的 RAG 增强 Prompt，直接塞进去成本高、噪音大
+    - Query Rewrite 只需要知道最近上下文，不需要读取全部知识库片段
+
+    所以这里会：
+    - 跳过 ToolMessage
+    - user 消息只保留原始用户问题
+    - assistant 消息做长度截断
+    """
+    if max_messages <= 0:
+        return "无历史对话。"
+
+    lines: list[str] = []
+    for message in messages[-max_messages:]:
+        role = get_message_role(message)
+        if role == "tool":
+            continue
+
+        content = get_message_content(message)
+        if not content:
+            continue
+
+        if role == "user":
+            content = extract_original_user_question(content)
+            label = "用户"
+        elif role == "assistant":
+            label = "助手"
+        else:
+            label = role or "未知"
+
+        # 改写问题只需要最近语义，不需要助手回答的完整长文本。
+        if len(content) > 300:
+            content = content[:300] + "..."
+
+        lines.append(f"{label}: {content}")
+
+    if not lines:
+        return "无历史对话。"
+
+    return "\n".join(lines)
+
+
+def is_query_rewrite_enabled() -> bool:
+    """读取是否开启 RAG Query Rewrite。"""
+    load_dotenv()
+    return env_bool(
+        "RAG_QUERY_REWRITE_ENABLED",
+        DEFAULT_RAG_QUERY_REWRITE_ENABLED,
+    )
+
+
+def get_rewrite_history_message_count() -> int:
+    """读取 Query Rewrite 最多参考多少条历史消息。"""
+    load_dotenv()
+    return env_int(
+        "RAG_REWRITE_HISTORY_MESSAGES",
+        DEFAULT_RAG_REWRITE_HISTORY_MESSAGES,
+    )
+
+
+def rewrite_query_for_rag(
+    *,
+    user_question: str,
+    conversation_messages: list,
+    model: ChatOpenAI,
+) -> str:
+    """
+    把用户当前问题改写成适合向量检索的独立问题。
+
+    为什么需要 Query Rewrite：
+    用户在多轮对话里经常会问：
+    - “它和微调有什么区别？”
+    - “那下一步呢？”
+    - “这个有什么问题？”
+
+    人类能从上下文知道“它 / 那 / 这个”指什么，
+    但向量检索只拿当前句子去查知识库，可能完全不知道指代对象。
+
+    所以这里先让模型做一次轻量改写：
+    - 输入：最近几轮对话 + 当前问题
+    - 输出：一个完整、独立、适合搜索的 query
+    - 检索：使用改写后的 query
+    - 回答：仍然面向用户原问题
+    """
+    question = clean_user_text(user_question)
+    if not question:
+        return user_question
+
+    if not is_query_rewrite_enabled():
+        LOGGER.info("Query Rewrite 已关闭，直接使用原始问题检索 query=%r", question)
+        return question
+
+    history_text = format_recent_history_for_rewrite(
+        conversation_messages,
+        max_messages=get_rewrite_history_message_count(),
+    )
+    rewrite_prompt = f"""
+你是 RAG 检索问题改写器。
+
+你的任务：
+根据【最近对话历史】和【当前用户问题】，把当前问题改写成一个独立、明确、适合向量检索的搜索问题。
+
+规则：
+1. 只输出改写后的问题，不要解释。
+2. 如果当前问题已经足够独立清楚，就原样输出。
+3. 如果当前问题里有“它、这个、那个、上面、下一步”等指代，要根据历史补全指代对象。
+4. 不要回答问题，只改写检索 query。
+5. 不要引入历史里没有出现的新实体。
+
+【最近对话历史】
+{history_text}
+
+【当前用户问题】
+{question}
+""".strip()
+
+    LOGGER.info("Query Rewrite: 原始问题=%r", question)
+    LOGGER.info("Query Rewrite: 参考历史如下\n%s", history_text)
+    response = model.invoke([
+        {
+            "role": "system",
+            "content": "你只负责把用户问题改写成适合 RAG 检索的独立 query。",
+        },
+        {
+            "role": "user",
+            "content": rewrite_prompt,
+        },
+    ])
+    rewritten_query = format_message_content(
+        getattr(response, "content", response)
+    ).strip()
+
+    if not rewritten_query:
+        LOGGER.info("Query Rewrite: 模型返回为空，回退使用原始问题")
+        return question
+
+    # 有些模型会自作聪明加引号或标签，这里做一点轻量清理。
+    rewritten_query = rewritten_query.strip().strip('"').strip("'").strip()
+    LOGGER.info("Query Rewrite: 改写后问题=%r", rewritten_query)
+    return rewritten_query
+
+
 def build_direct_rag_prompt(
     user_question: str,
+    *,
+    conversation_messages: list | None = None,
+    rewrite_model: ChatOpenAI | None = None,
     max_results: int = DIRECT_RAG_MAX_RESULTS,
 ) -> str:
     """
@@ -120,17 +386,31 @@ def build_direct_rag_prompt(
     - 检索时拿到每个 chunk 的 distance
     - distance 小于等于阈值的 chunk 才会进入 Prompt
     - 如果没有 chunk 通过阈值，就让模型明确说明知识库证据不足
+
+    现在还加入了 Query Rewrite：
+    - 先根据最近对话历史把用户问题改写成独立检索 query
+    - 用改写后的 query 去查知识库
+    - 最终 Prompt 里同时保留“原始用户问题”和“实际检索 query”
     """
-    question = user_question.strip()
+    question = clean_user_text(user_question)
     if not question:
         return user_question
 
+    retrieval_query = question
+    if rewrite_model is not None:
+        retrieval_query = rewrite_query_for_rag(
+            user_question=question,
+            conversation_messages=conversation_messages or [],
+            model=rewrite_model,
+        )
+
     LOGGER.info(
-        "直接 Prompt RAG: 开始检索 query=%r max_results=%s",
+        "直接 Prompt RAG: 开始检索 original_question=%r retrieval_query=%r max_results=%s",
         question,
+        retrieval_query,
         max_results,
     )
-    results = search_knowledge_with_scores(query=question, max_results=max_results)
+    results = search_knowledge_with_scores(query=retrieval_query, max_results=max_results)
     accepted_count = sum(
         1
         for result in results
@@ -160,6 +440,9 @@ def build_direct_rag_prompt(
 3. 如果检索结果提示“没有通过相关性阈值的知识片段”，要明确说明“知识库里没有找到足够相关的内容”。
 4. 如果使用了检索结果，请尽量带上来源文件名。
 5. 不要编造知识库中没有出现的来源。
+
+【实际用于检索的问题】
+{retrieval_query}
 
 【本地知识库检索结果】
 {retrieved_context}
@@ -299,6 +582,10 @@ def main() -> None:
     # - structured_agent: 面向固定字段输出
     agent = build_agent()
     structured_agent = build_structured_agent()
+    # rewrite_model 专门用于 Query Rewrite。
+    # 它不绑定工具，也不负责最终回答，只做一件事：
+    # 把“用户聊天式问题”改写成“适合向量检索的问题”。
+    rewrite_model = build_model()
     # messages 用来保存整段对话历史，多轮对话的关键就是把历史消息继续传给模型。
     # 在这个示例里，你可以把它理解成一个“消息列表”：
     # - user: 用户消息，对应 HumanMessage
@@ -315,7 +602,7 @@ def main() -> None:
 
     while True:
         # 第二步：从终端持续读取用户问题。
-        user_input = input("\n你: ").strip()
+        user_input = clean_user_text(input("\n你: "))
         if not user_input:
             print("你还没有输入内容。")
             continue
@@ -332,11 +619,17 @@ def main() -> None:
             print("请在 /json 后面输入问题。")
             continue
 
-        # 第三步：先做本地知识库检索，再把检索结果直接拼进本轮用户 Prompt。
+        # 第三步：先做 Query Rewrite，再做本地知识库检索，
+        # 最后把检索结果直接拼进本轮用户 Prompt。
         # 这是“直接 Prompt 版 RAG”的核心改动。
         # normalized_input 是用户真正输入的问题；
-        # rag_prompt 是增强后的问题，里面包含“检索结果 + 用户问题 + 回答规则”。
-        rag_prompt = build_direct_rag_prompt(normalized_input)
+        # Query Rewrite 会参考 messages 里的最近历史，把它改写成 retrieval_query；
+        # rag_prompt 是增强后的问题，里面包含“检索 query + 检索结果 + 用户问题 + 回答规则”。
+        rag_prompt = build_direct_rag_prompt(
+            normalized_input,
+            conversation_messages=messages,
+            rewrite_model=rewrite_model,
+        )
 
         # 第四步：把增强后的用户问题追加到历史消息中。
         # 这里的 role='user' 是最常见的消息类型之一，表示这条消息来自用户。
