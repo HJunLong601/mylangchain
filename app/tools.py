@@ -271,6 +271,8 @@ def search_local_knowledge(query: str, max_results: int = 3) -> str:
     注意事项：
     - 这是当前项目的向量 RAG 检索工具：先把问题转成 embedding，再做语义相似度搜索。
     - 它不是直接给最终结论，而是返回“可能有帮助的证据片段”。
+    - search_knowledge(...) 内部已经会按 RAG_MAX_DISTANCE 做阈值过滤；
+      没通过阈值的低相关 chunk 不会返回给模型。
     - query 应该尽量是明确问题，例如“LangChain 里的 Tool 是什么”。
     - max_results 建议保持较小，避免一次返回过多片段让上下文变乱。
     - 当前默认主流程已经改成“直接 Prompt 版 RAG”，不会再把这个函数注册给 agent。

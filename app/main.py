@@ -9,7 +9,7 @@ from langchain.agents import create_agent
 from langchain.agents.structured_output import ToolStrategy
 from langchain_openai import ChatOpenAI
 
-from app.rag import format_search_results, search_knowledge
+from app.rag import format_scored_search_results, search_knowledge_with_scores
 from app.schemas import AssistantStructuredReply
 from app.tools import (
     get_current_time,
@@ -115,6 +115,11 @@ def build_direct_rag_prompt(
     - 检索动作由我们的 Python 代码主动执行，不再等模型自己决定是否调用 RAG 工具。
     - 检索结果会成为本轮 HumanMessage 的一部分，而不是 ToolMessage。
     - 好处是链路更简单、更可控；代价是每轮都会先检索，Prompt 也会变长。
+
+    这一版又补上了“检索质量控制”：
+    - 检索时拿到每个 chunk 的 distance
+    - distance 小于等于阈值的 chunk 才会进入 Prompt
+    - 如果没有 chunk 通过阈值，就让模型明确说明知识库证据不足
     """
     question = user_question.strip()
     if not question:
@@ -125,22 +130,36 @@ def build_direct_rag_prompt(
         question,
         max_results,
     )
-    results = search_knowledge(query=question, max_results=max_results)
-    LOGGER.info("直接 Prompt RAG: 检索完成 hits=%s", len(results))
+    results = search_knowledge_with_scores(query=question, max_results=max_results)
+    accepted_count = sum(
+        1
+        for result in results
+        if result.passed_threshold
+    )
+    LOGGER.info(
+        "直接 Prompt RAG: 检索完成 raw_hits=%s accepted_hits=%s rejected_hits=%s",
+        len(results),
+        accepted_count,
+        len(results) - accepted_count,
+    )
 
-    # format_search_results(...) 会把 Document 分片整理成人类和模型都容易读的文本。
+    # format_scored_search_results(...) 会把通过阈值的 Document 分片整理成文本。
     # 这里得到的 retrieved_context 会被直接拼到 Prompt 里，
     # 所以模型看到它时，并不知道“这是工具消息”，只会把它当成本轮输入的一部分。
-    retrieved_context = format_search_results(results)
+    #
+    # 如果没有任何 chunk 通过阈值，这里也不会强行塞入低质量内容，
+    # 而是返回一段“证据不足”的说明，让模型基于这个信号做兜底回答。
+    retrieved_context = format_scored_search_results(results)
 
     prompt = f"""
 你正在使用“直接 Prompt 版 RAG”回答问题。
 
 请遵守这些规则：
 1. 优先根据【本地知识库检索结果】回答。
-2. 如果检索结果和用户问题明显无关，要明确说明“知识库里没有找到直接相关内容”。
-3. 如果使用了检索结果，请尽量带上来源文件名。
-4. 不要编造知识库中没有出现的来源。
+2. 只有通过阈值的检索片段才算可靠证据。
+3. 如果检索结果提示“没有通过相关性阈值的知识片段”，要明确说明“知识库里没有找到足够相关的内容”。
+4. 如果使用了检索结果，请尽量带上来源文件名。
+5. 不要编造知识库中没有出现的来源。
 
 【本地知识库检索结果】
 {retrieved_context}
@@ -150,9 +169,13 @@ def build_direct_rag_prompt(
 """.strip()
 
     LOGGER.info(
-        "直接 Prompt RAG: 已生成增强 Prompt chars=%s context_chars=%s",
+        (
+            "直接 Prompt RAG: 已生成增强 Prompt chars=%s context_chars=%s "
+            "accepted_hits=%s"
+        ),
         len(prompt),
         len(retrieved_context),
+        accepted_count,
     )
     LOGGER.info(
         "直接 Prompt RAG: 即将发送给模型的本轮 Prompt 如下\n%s",

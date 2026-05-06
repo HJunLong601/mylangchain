@@ -4,6 +4,7 @@ import json
 import logging
 import os
 import shutil
+from dataclasses import dataclass
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -29,6 +30,29 @@ KNOWLEDGE_EXTENSIONS = {".txt", ".md"}
 DEFAULT_VECTOR_DIR = ROOT_DIR / ".rag_chroma"
 DEFAULT_COLLECTION_NAME = "mylangchain_knowledge"
 SIGNATURE_FILE_NAME = "knowledge_signature.json"
+DEFAULT_MAX_DISTANCE = 1.2
+
+
+@dataclass(frozen=True)
+class RagSearchResult:
+    """
+    表示一次向量检索命中的结果。
+
+    为什么不再只返回 Document：
+    - Document 只包含正文和 metadata，看不到“为什么它被认为相关”
+    - RAG 调优时，分数非常关键；没有分数，就只能凭感觉猜检索质量
+    - 把分数和是否通过阈值一起返回，后面拼 Prompt 时就能只采用可靠证据
+
+    字段说明：
+    - document: LangChain 的文档分片，里面有 page_content 和 metadata
+    - distance: Chroma 返回的距离分数，通常越小越相关
+    - relevance_score: 为了方便阅读换算出的相关度分数，越接近 1 越相关
+    - passed_threshold: 当前结果是否通过我们设置的最大距离阈值
+    """
+    document: Document
+    distance: float
+    relevance_score: float
+    passed_threshold: bool
 
 
 # 下面这几个模块级变量用于做“懒加载缓存”。
@@ -135,7 +159,51 @@ def get_vector_store_dir() -> Path:
 def get_collection_name() -> str:
     """获取 Chroma collection 名称。"""
     load_dotenv()
-    return os.getenv("RAG_COLLECTION_NAME", DEFAULT_COLLECTION_NAME).strip()
+    return os.getenv("RAG_COLLECTION_NAME", DEFAULT_COLLECTION_NAME).strip() or DEFAULT_COLLECTION_NAME
+
+
+def get_max_distance_threshold() -> float:
+    """
+    获取 RAG 检索的最大距离阈值。
+
+    Chroma 的 similarity_search_with_score(...) 会返回 distance：
+    - distance 越小，说明 query 和 chunk 越接近
+    - distance 越大，说明相关性越弱
+
+    所以这里的阈值不是“分数越高越好”，而是“距离不能超过多少”。
+    默认值 1.2 是一个学习项目里的宽松起点，不是生产最佳值。
+    真实项目里应该通过日志观察不同问题的命中距离，再逐步调整。
+    """
+    load_dotenv()
+
+    raw_threshold = os.getenv("RAG_MAX_DISTANCE", str(DEFAULT_MAX_DISTANCE)).strip()
+    try:
+        threshold = float(raw_threshold)
+    except ValueError as exc:
+        raise ValueError(
+            f"RAG_MAX_DISTANCE 必须是数字，当前值为: {raw_threshold}"
+        ) from exc
+
+    if threshold <= 0:
+        raise ValueError("RAG_MAX_DISTANCE 必须大于 0。")
+
+    return threshold
+
+
+def distance_to_relevance_score(distance: float) -> float:
+    """
+    把 Chroma distance 转成更适合人读的相关度分数。
+
+    注意：不同向量库、不同距离算法的原始分数含义并不完全一样。
+    Chroma 这里给我们的是 distance，学习时可以先记住：
+    - distance: 越小越好
+    - relevance_score: 越大越好
+
+    这里做一个简单换算：1 / (1 + distance)。
+    它不会改变排序，只是把“距离越小越好”转换成“相关度越高越好”，
+    方便在日志和 Prompt 里观察。
+    """
+    return 1 / (1 + max(distance, 0))
 
 
 def get_signature_file_path(vector_store_dir: Path) -> Path:
@@ -549,20 +617,88 @@ def search_knowledge(
 
     这就是更接近真实 RAG 项目的检索方式。
     """
+    scored_results = search_knowledge_with_scores(
+        query=query,
+        max_results=max_results,
+    )
+    return [
+        result.document
+        for result in scored_results
+        if result.passed_threshold
+    ]
+
+
+def search_knowledge_with_scores(
+    query: str,
+    max_results: int = 3,
+) -> list[RagSearchResult]:
+    """
+    在本地知识库中做带分数的语义检索。
+
+    这是这一阶段新增的关键方法。
+    和 search_knowledge(...) 相比，它不只是返回 Document，还会返回：
+    - Chroma 原始 distance
+    - 换算后的 relevance_score
+    - 是否通过最大距离阈值
+
+    为什么要这么做：
+    - RAG 生产落地时，不能“只要搜到就塞给模型”
+    - 如果检索结果本身不相关，模型会被错误上下文带偏
+    - 阈值过滤可以让系统在证据不足时诚实兜底，而不是硬编答案
+    """
     query = query.strip()
     if not query:
         return []
 
-    LOGGER.info("开始相似度检索 query=%r max_results=%s", query, max_results)
+    if max_results <= 0:
+        raise ValueError("max_results 必须大于 0。")
+
+    max_distance = get_max_distance_threshold()
+    LOGGER.info(
+        "开始带分数的相似度检索 query=%r max_results=%s max_distance=%s",
+        query,
+        max_results,
+        max_distance,
+    )
     vector_store = get_vector_store()
-    results = vector_store.similarity_search(query, k=max_results)
-    LOGGER.info("相似度检索完成 hits=%s", len(results))
-    for index, item in enumerate(results, start=1):
+    raw_results = vector_store.similarity_search_with_score(query, k=max_results)
+
+    results: list[RagSearchResult] = []
+    for document, distance in raw_results:
+        distance = float(distance)
+        results.append(
+            RagSearchResult(
+                document=document,
+                distance=distance,
+                relevance_score=distance_to_relevance_score(distance),
+                passed_threshold=distance <= max_distance,
+            )
+        )
+
+    accepted_count = sum(
+        1
+        for result in results
+        if result.passed_threshold
+    )
+    LOGGER.info(
+        "带分数的相似度检索完成 raw_hits=%s accepted_hits=%s rejected_hits=%s",
+        len(results),
+        accepted_count,
+        len(results) - accepted_count,
+    )
+    for index, result in enumerate(results, start=1):
+        item = result.document
         LOGGER.info(
-            "命中结果 #%s source=%s chunk_index=%s chars=%s preview=%r",
+            (
+                "命中结果 #%s source=%s chunk_index=%s distance=%.6f "
+                "relevance_score=%.6f passed_threshold=%s chars=%s preview=%r"
+            ),
             index,
             item.metadata.get("source"),
             item.metadata.get("chunk_index"),
+            result.distance,
+            result.relevance_score,
+            result.passed_threshold,
             len(item.page_content),
             item.page_content[:120],
         )
@@ -602,6 +738,49 @@ def format_search_results(results: list[Document]) -> str:
             [
                 "",
                 f"[来源] {source} (chunk #{chunk_index})",
+                "[内容]",
+                item.page_content,
+            ]
+        )
+
+    return "\n".join(lines)
+
+
+def format_scored_search_results(results: list[RagSearchResult]) -> str:
+    """
+    把带分数的检索结果格式化成适合直接拼进 Prompt 的文本。
+
+    和 format_search_results(...) 的区别：
+    - 这里只展示通过阈值的结果
+    - 每个 chunk 会带上 distance / relevance_score
+    - 如果没有结果通过阈值，会返回明确的“证据不足”提示
+
+    这一步是 RAG 质量控制的核心：
+    检索系统不是把所有命中都交给模型，而是先筛掉不可靠证据。
+    """
+    accepted_results = [
+        result
+        for result in results
+        if result.passed_threshold
+    ]
+
+    if not accepted_results:
+        return (
+            "没有检索到通过相关性阈值的知识片段。\n"
+            "这表示当前知识库没有足够可靠的证据支持回答这个问题。"
+        )
+
+    lines = ["已从本地向量知识库检索到以下通过阈值的相关片段："]
+    for result in accepted_results:
+        item = result.document
+        source = item.metadata.get("source", "未知来源")
+        chunk_index = item.metadata.get("chunk_index", "?")
+        lines.extend(
+            [
+                "",
+                f"[来源] {source} (chunk #{chunk_index})",
+                f"[distance] {result.distance:.6f}，越小越相关",
+                f"[relevance_score] {result.relevance_score:.6f}，越接近 1 越相关",
                 "[内容]",
                 item.page_content,
             ]
