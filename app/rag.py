@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import shutil
 from dataclasses import dataclass
 from pathlib import Path
@@ -31,6 +32,7 @@ DEFAULT_VECTOR_DIR = ROOT_DIR / ".rag_chroma"
 DEFAULT_COLLECTION_NAME = "mylangchain_knowledge"
 SIGNATURE_FILE_NAME = "knowledge_signature.json"
 DEFAULT_MAX_DISTANCE = 1.2
+DEFAULT_RERANK_ENABLED = True
 
 
 @dataclass(frozen=True)
@@ -48,11 +50,19 @@ class RagSearchResult:
     - distance: Chroma 返回的距离分数，通常越小越相关
     - relevance_score: 为了方便阅读换算出的相关度分数，越接近 1 越相关
     - passed_threshold: 当前结果是否通过我们设置的最大距离阈值
+    - retrieval_rank: 向量库原始召回顺序，数字越小代表越靠前
+    - keyword_score: 教学版 rerank 的关键词命中分数
+    - length_penalty: 教学版 rerank 的长度惩罚，避免过短或过长 chunk 盲目靠前
+    - rerank_score: 教学版 rerank 最终分数，越大越应该优先放进 Prompt
     """
     document: Document
     distance: float
     relevance_score: float
     passed_threshold: bool
+    retrieval_rank: int = 0
+    keyword_score: float = 0
+    length_penalty: float = 0
+    rerank_score: float = 0
 
 
 # 下面这几个模块级变量用于做“懒加载缓存”。
@@ -190,6 +200,29 @@ def get_max_distance_threshold() -> float:
     return threshold
 
 
+def get_rerank_enabled() -> bool:
+    """
+    读取是否开启教学版 Rerank。
+
+    生产项目里 Rerank 往往会接专门的重排序模型。
+    这里先用规则版实现，是为了让你先看懂这一层在 RAG 链路里的位置：
+    - Retrieval: 负责多召回一些候选
+    - Rerank: 负责重新排序，挑出最值得进入 Prompt 的证据
+    """
+    load_dotenv()
+    raw_value = os.getenv(
+        "RAG_RERANK_ENABLED",
+        str(DEFAULT_RERANK_ENABLED),
+    ).strip().lower()
+
+    if raw_value in {"true", "1", "yes", "on"}:
+        return True
+    if raw_value in {"false", "0", "no", "off"}:
+        return False
+
+    raise ValueError(f"RAG_RERANK_ENABLED 必须是布尔值，当前值为: {raw_value}")
+
+
 def distance_to_relevance_score(distance: float) -> float:
     """
     把 Chroma distance 转成更适合人读的相关度分数。
@@ -204,6 +237,104 @@ def distance_to_relevance_score(distance: float) -> float:
     方便在日志和 Prompt 里观察。
     """
     return 1 / (1 + max(distance, 0))
+
+
+def tokenize_for_rerank(text: str) -> list[str]:
+    """
+    为教学版 Rerank 做一个很轻量的分词。
+
+    这里不是严格的中文分词器，而是一个足够透明的教学实现：
+    - 英文和数字按单词抽取
+    - 中文按连续字符片段抽取
+    - 对较长中文片段额外生成 2 字符窗口，方便匹配“微调”“检索”等短词
+
+    真实项目里可以换成 jieba、HanLP，或者直接使用 reranker 模型。
+    当前版本故意保持简单，让你能从日志里看清楚分数是怎么来的。
+    """
+    raw_tokens = re.findall(r"[A-Za-z0-9]+|[\u4e00-\u9fff]+", text.lower())
+    tokens: list[str] = []
+
+    for token in raw_tokens:
+        tokens.append(token)
+        if re.fullmatch(r"[\u4e00-\u9fff]+", token) and len(token) > 2:
+            tokens.extend(
+                token[index:index + 2]
+                for index in range(0, len(token) - 1)
+            )
+
+    return [
+        token
+        for token in tokens
+        if token.strip()
+    ]
+
+
+def calculate_keyword_score(query: str, text: str) -> float:
+    """
+    计算 query 和 chunk 的关键词重合分数。
+
+    这是教学版 Rerank 的一个特征：
+    - 如果 query 里的关键词在 chunk 里出现越多，分数越高
+    - 分数范围控制在 0 到 1，方便和 relevance_score 混合
+
+    这个分数不能替代向量相似度，只是补充“字面匹配”的信号。
+    """
+    query_tokens = set(tokenize_for_rerank(query))
+    if not query_tokens:
+        return 0
+
+    text_tokens = set(tokenize_for_rerank(text))
+    if not text_tokens:
+        return 0
+
+    matched_tokens = query_tokens & text_tokens
+    return len(matched_tokens) / len(query_tokens)
+
+
+def calculate_length_penalty(text: str) -> float:
+    """
+    计算 chunk 长度惩罚。
+
+    一个很短的 chunk 可能信息不足，一个过长的 chunk 又容易浪费上下文窗口。
+    当前项目 chunk_size 默认是 400，所以这里把 200 到 600 字符视作比较舒服的范围：
+    - 在范围内：不惩罚
+    - 太短或太长：给一个小惩罚
+
+    注意这是教学规则，不是数学真理。真实项目要结合数据调参。
+    """
+    length = len(text)
+    if 200 <= length <= 600:
+        return 0
+    if length < 200:
+        return min((200 - length) / 200, 1) * 0.12
+    return min((length - 600) / 600, 1) * 0.12
+
+
+def calculate_rerank_score(query: str, result: RagSearchResult) -> tuple[float, float, float]:
+    """
+    计算教学版 Rerank 的最终分数。
+
+    当前规则：
+    - relevance_score 权重 70%：保留向量检索的语义排序能力
+    - keyword_score 权重 30%：补充关键词命中信号
+    - length_penalty：轻微惩罚过短或过长的 chunk
+
+    这个函数返回三个值：
+    - rerank_score: 最终排序分数
+    - keyword_score: 关键词命中分数
+    - length_penalty: 长度惩罚
+    """
+    keyword_score = calculate_keyword_score(
+        query,
+        result.document.page_content,
+    )
+    length_penalty = calculate_length_penalty(result.document.page_content)
+    rerank_score = (
+        result.relevance_score * 0.7
+        + keyword_score * 0.3
+        - length_penalty
+    )
+    return rerank_score, keyword_score, length_penalty
 
 
 def get_signature_file_path(vector_store_dir: Path) -> Path:
@@ -664,7 +795,7 @@ def search_knowledge_with_scores(
     raw_results = vector_store.similarity_search_with_score(query, k=max_results)
 
     results: list[RagSearchResult] = []
-    for document, distance in raw_results:
+    for retrieval_rank, (document, distance) in enumerate(raw_results, start=1):
         distance = float(distance)
         results.append(
             RagSearchResult(
@@ -672,6 +803,7 @@ def search_knowledge_with_scores(
                 distance=distance,
                 relevance_score=distance_to_relevance_score(distance),
                 passed_threshold=distance <= max_distance,
+                retrieval_rank=retrieval_rank,
             )
         )
 
@@ -703,6 +835,126 @@ def search_knowledge_with_scores(
             item.page_content[:120],
         )
     return results
+
+
+def rerank_search_results(
+    *,
+    query: str,
+    results: list[RagSearchResult],
+    max_results: int,
+) -> list[RagSearchResult]:
+    """
+    对向量召回结果做教学版 Rerank，并返回最终进入 Prompt 的 Top N。
+
+    这一步模拟生产 RAG 里常见的“两阶段检索”：
+    1. 向量库先召回更多候选，比如 top 8 / top 20
+    2. Rerank 再根据更细的相关性判断重新排序
+    3. 最后只把排序最靠前的少数 chunk 塞进 Prompt
+
+    当前实现是规则版，不依赖额外模型：
+    - relevance_score: 来自向量检索，表示语义相似度
+    - keyword_score: query 和 chunk 的关键词重合
+    - length_penalty: chunk 太短或太长时轻微扣分
+
+    为什么只对通过阈值的结果排序：
+    - 阈值过滤负责“证据够不够可靠”
+    - Rerank 负责“可靠证据里谁更应该靠前”
+    - 低相关结果即使字面命中，也不应该重新混进 Prompt
+    """
+    if max_results <= 0:
+        raise ValueError("max_results 必须大于 0。")
+
+    if not results:
+        LOGGER.info("Rerank: 没有候选结果，跳过重排")
+        return []
+
+    LOGGER.info("Rerank: 向量召回原始顺序如下")
+    for index, result in enumerate(results, start=1):
+        item = result.document
+        LOGGER.info(
+            (
+                "Rerank before #%s retrieval_rank=%s source=%s chunk_index=%s "
+                "distance=%.6f relevance_score=%.6f passed_threshold=%s preview=%r"
+            ),
+            index,
+            result.retrieval_rank,
+            item.metadata.get("source"),
+            item.metadata.get("chunk_index"),
+            result.distance,
+            result.relevance_score,
+            result.passed_threshold,
+            item.page_content[:80],
+        )
+
+    accepted_results = [
+        result
+        for result in results
+        if result.passed_threshold
+    ]
+    if not accepted_results:
+        LOGGER.info("Rerank: 没有候选通过阈值，返回空结果")
+        return []
+
+    if not get_rerank_enabled():
+        LOGGER.info("Rerank 已关闭，按向量召回顺序取前 %s 条", max_results)
+        return accepted_results[:max_results]
+
+    reranked_results: list[RagSearchResult] = []
+    for result in accepted_results:
+        rerank_score, keyword_score, length_penalty = calculate_rerank_score(
+            query,
+            result,
+        )
+        reranked_results.append(
+            RagSearchResult(
+                document=result.document,
+                distance=result.distance,
+                relevance_score=result.relevance_score,
+                passed_threshold=result.passed_threshold,
+                retrieval_rank=result.retrieval_rank,
+                keyword_score=keyword_score,
+                length_penalty=length_penalty,
+                rerank_score=rerank_score,
+            )
+        )
+
+    reranked_results.sort(
+        key=lambda result: (
+            result.rerank_score,
+            result.relevance_score,
+            -result.retrieval_rank,
+        ),
+        reverse=True,
+    )
+
+    LOGGER.info("Rerank: 重排后顺序如下")
+    for index, result in enumerate(reranked_results, start=1):
+        item = result.document
+        LOGGER.info(
+            (
+                "Rerank after #%s retrieval_rank=%s source=%s chunk_index=%s "
+                "rerank_score=%.6f relevance_score=%.6f keyword_score=%.6f "
+                "length_penalty=%.6f distance=%.6f preview=%r"
+            ),
+            index,
+            result.retrieval_rank,
+            item.metadata.get("source"),
+            item.metadata.get("chunk_index"),
+            result.rerank_score,
+            result.relevance_score,
+            result.keyword_score,
+            result.length_penalty,
+            result.distance,
+            item.page_content[:80],
+        )
+
+    final_results = reranked_results[:max_results]
+    LOGGER.info(
+        "Rerank: 最终进入 Prompt 的结果数=%s max_results=%s",
+        len(final_results),
+        max_results,
+    )
+    return final_results
 
 
 def format_search_results(results: list[Document]) -> str:
@@ -752,7 +1004,7 @@ def format_scored_search_results(results: list[RagSearchResult]) -> str:
 
     和 format_search_results(...) 的区别：
     - 这里只展示通过阈值的结果
-    - 每个 chunk 会带上 distance / relevance_score
+    - 每个 chunk 会带上 distance / relevance_score / rerank_score
     - 如果没有结果通过阈值，会返回明确的“证据不足”提示
 
     这一步是 RAG 质量控制的核心：
@@ -779,8 +1031,12 @@ def format_scored_search_results(results: list[RagSearchResult]) -> str:
             [
                 "",
                 f"[来源] {source} (chunk #{chunk_index})",
+                f"[retrieval_rank] {result.retrieval_rank}，向量库原始召回排名",
                 f"[distance] {result.distance:.6f}，越小越相关",
                 f"[relevance_score] {result.relevance_score:.6f}，越接近 1 越相关",
+                f"[keyword_score] {result.keyword_score:.6f}，关键词命中越高越相关",
+                f"[length_penalty] {result.length_penalty:.6f}，长度惩罚越小越好",
+                f"[rerank_score] {result.rerank_score:.6f}，重排最终分数越高越优先",
                 "[内容]",
                 item.page_content,
             ]

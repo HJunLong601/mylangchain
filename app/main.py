@@ -9,7 +9,11 @@ from langchain.agents import create_agent
 from langchain.agents.structured_output import ToolStrategy
 from langchain_openai import ChatOpenAI
 
-from app.rag import format_scored_search_results, search_knowledge_with_scores
+from app.rag import (
+    format_scored_search_results,
+    rerank_search_results,
+    search_knowledge_with_scores,
+)
 from app.schemas import AssistantStructuredReply
 from app.tools import (
     get_current_time,
@@ -37,6 +41,7 @@ LOGGER.propagate = False
 # 数量太少：可能漏掉重要上下文。
 # 数量太多：Prompt 会变长，成本更高，也更容易干扰模型。
 DIRECT_RAG_MAX_RESULTS = 3
+DEFAULT_RAG_RETRIEVAL_CANDIDATES = 8
 DEFAULT_RAG_QUERY_REWRITE_ENABLED = True
 DEFAULT_RAG_REWRITE_HISTORY_MESSAGES = 6
 
@@ -279,6 +284,27 @@ def get_rewrite_history_message_count() -> int:
     )
 
 
+def get_rag_retrieval_candidate_count() -> int:
+    """
+    读取 RAG 向量召回候选数量。
+
+    现在 RAG 是“两阶段检索”：
+    - 第一阶段 Retrieval 多取一些候选，比如 8 条
+    - 第二阶段 Rerank 从候选里挑最适合进 Prompt 的 3 条
+
+    这里控制的是第一阶段候选数量，不是最终进入 Prompt 的数量。
+    """
+    load_dotenv()
+    candidate_count = env_int(
+        "RAG_RETRIEVAL_CANDIDATES",
+        DEFAULT_RAG_RETRIEVAL_CANDIDATES,
+    )
+    if candidate_count <= 0:
+        raise ValueError("RAG_RETRIEVAL_CANDIDATES 必须大于 0。")
+
+    return candidate_count
+
+
 def rewrite_query_for_rag(
     *,
     user_question: str,
@@ -391,6 +417,11 @@ def build_direct_rag_prompt(
     - 先根据最近对话历史把用户问题改写成独立检索 query
     - 用改写后的 query 去查知识库
     - 最终 Prompt 里同时保留“原始用户问题”和“实际检索 query”
+
+    这一版继续加入 Rerank：
+    - 向量库先召回更多候选
+    - 规则版 Rerank 重新排序
+    - 只把重排后的 Top N 放进 Prompt
     """
     question = clean_user_text(user_question)
     if not question:
@@ -404,26 +435,47 @@ def build_direct_rag_prompt(
             model=rewrite_model,
         )
 
-    LOGGER.info(
-        "直接 Prompt RAG: 开始检索 original_question=%r retrieval_query=%r max_results=%s",
-        question,
-        retrieval_query,
+    retrieval_candidate_count = max(
+        get_rag_retrieval_candidate_count(),
         max_results,
     )
-    results = search_knowledge_with_scores(query=retrieval_query, max_results=max_results)
+    LOGGER.info(
+        (
+            "直接 Prompt RAG: 开始检索 original_question=%r retrieval_query=%r "
+            "retrieval_candidates=%s final_max_results=%s"
+        ),
+        question,
+        retrieval_query,
+        retrieval_candidate_count,
+        max_results,
+    )
+    candidate_results = search_knowledge_with_scores(
+        query=retrieval_query,
+        max_results=retrieval_candidate_count,
+    )
     accepted_count = sum(
         1
-        for result in results
+        for result in candidate_results
         if result.passed_threshold
     )
     LOGGER.info(
-        "直接 Prompt RAG: 检索完成 raw_hits=%s accepted_hits=%s rejected_hits=%s",
-        len(results),
+        "直接 Prompt RAG: 召回完成 raw_hits=%s accepted_hits=%s rejected_hits=%s",
+        len(candidate_results),
         accepted_count,
-        len(results) - accepted_count,
+        len(candidate_results) - accepted_count,
     )
 
-    # format_scored_search_results(...) 会把通过阈值的 Document 分片整理成文本。
+    results = rerank_search_results(
+        query=retrieval_query,
+        results=candidate_results,
+        max_results=max_results,
+    )
+    LOGGER.info(
+        "直接 Prompt RAG: Rerank 完成 final_hits=%s",
+        len(results),
+    )
+
+    # format_scored_search_results(...) 会把重排后的 Document 分片整理成文本。
     # 这里得到的 retrieved_context 会被直接拼到 Prompt 里，
     # 所以模型看到它时，并不知道“这是工具消息”，只会把它当成本轮输入的一部分。
     #

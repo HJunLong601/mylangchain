@@ -50,6 +50,8 @@ EMBEDDING_DIMENSIONS=1024
 RAG_VECTOR_DIR=.rag_chroma
 RAG_COLLECTION_NAME=mylangchain_knowledge
 RAG_MAX_DISTANCE=1.2
+RAG_RETRIEVAL_CANDIDATES=8
+RAG_RERANK_ENABLED=true
 RAG_QUERY_REWRITE_ENABLED=true
 RAG_REWRITE_HISTORY_MESSAGES=6
 ```
@@ -110,6 +112,7 @@ python -m app.main
 默认 RAG 链路已经改成直接 Prompt 形式：程序先检索知识库，再把命中的片段拼进本轮用户消息中，模型不会再通过 `ToolMessage` 接收知识库内容。
 检索时会打印每个 chunk 的 `distance` 和 `relevance_score`，并用 `RAG_MAX_DISTANCE` 过滤低相关结果。`distance` 越小越相关，超过阈值的 chunk 不会进入 Prompt。
 检索前还会执行 Query Rewrite：程序会参考最近几条历史，把“它和微调有什么区别？”这类上下文问题改写成更适合检索的独立问题，例如“RAG 和微调有什么区别？”。
+检索后会执行教学版 Rerank：向量库先按 `RAG_RETRIEVAL_CANDIDATES` 多召回候选，再根据 `relevance_score`、关键词命中和长度惩罚重新排序，最后只把重排后的 Top 3 放进 Prompt。
 
 如果你想看“新建一个工具应该怎么写”，可以直接打开：
 
@@ -126,11 +129,11 @@ python -m app.main
 建议按这个顺序继续扩展：
 
 1. 先看懂 `build_agent()` 是怎么把模型和工具接起来的
-2. 看懂 `app/main.py` 里“原始问题 -> Query Rewrite -> 检索 query -> 直接 Prompt”的链路
-3. 看懂 `app/rag.py` 里“文档加载 -> 切分 -> embedding -> Chroma 持久化向量库 -> 带分数检索 -> 阈值过滤”的 RAG 流程
-4. 自己新增知识文件，观察 `distance` 和 `relevance_score` 怎么变化
-5. 调整 `RAG_MAX_DISTANCE`，观察哪些 chunk 会进入 Prompt
-6. 再进入更正式的生产向量数据库 / LangGraph
+2. 看懂 `app/main.py` 里“原始问题 -> Query Rewrite -> 检索 query -> 召回候选 -> Rerank -> 直接 Prompt”的链路
+3. 看懂 `app/rag.py` 里“文档加载 -> 切分 -> embedding -> Chroma 持久化向量库 -> 带分数检索 -> 阈值过滤 -> 重排序”的 RAG 流程
+4. 自己新增知识文件，观察 `distance`、`relevance_score` 和 `rerank_score` 怎么变化
+5. 调整 `RAG_MAX_DISTANCE` 和 `RAG_RETRIEVAL_CANDIDATES`，观察哪些 chunk 会进入 Prompt
+6. 再进入更正式的 reranker 模型 / 生产向量数据库 / LangGraph
 
 ## 7. 常见问题
 
