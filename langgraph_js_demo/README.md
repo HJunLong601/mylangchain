@@ -43,6 +43,7 @@
 - Node/TypeScript 项目初始化
 - 最小 LangGraph
 - State 流转示例
+- 条件分支示例
 
 运行方式：
 
@@ -52,6 +53,7 @@ npm install
 npm run typecheck
 npm run dev:simple
 npm run dev:state
+npm run dev:conditional
 ```
 
 当前最小图：
@@ -80,6 +82,25 @@ State 示例重点观察：
 - `questionType` 由第二个节点写入
 - `answer` 由第三个节点写入
 - `steps` 通过 reducer 追加执行日志
+
+当前条件分支示例：
+
+```text
+START
+-> classifyQuestion
+-> routeQuestion
+   -> ragAnswer
+   -> toolAnswer
+   -> chatAnswer
+-> END
+```
+
+条件分支重点观察：
+
+- `classifyQuestion` 是普通节点，负责写入 `questionType`
+- `routeQuestion` 是路由函数，负责读取 State 并返回分支 key
+- `addConditionalEdges` 把分支 key 映射到真实节点
+- 不同问题会进入不同 answer 节点
 
 ## 初始目录规划
 

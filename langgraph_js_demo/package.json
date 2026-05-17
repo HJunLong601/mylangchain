@@ -6,6 +6,7 @@
   "scripts": {
     "dev:simple": "tsx server/graphs/simpleGraph.ts",
     "dev:state": "tsx server/graphs/stateGraph.ts",
+    "dev:conditional": "tsx server/graphs/conditionalGraph.ts",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
