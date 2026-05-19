@@ -11,7 +11,9 @@
 | 最小 Graph | 已完成 | 已实现并验证 `server/graphs/simpleGraph.ts` |
 | State 示例 | 已完成 | 已实现并验证 `server/graphs/stateGraph.ts` |
 | 条件分支 | 已完成 | 已实现并验证 `server/graphs/conditionalGraph.ts` |
-| 可视化页面 | 未开始 | 待实现 React Flow 页面 |
+| 后端 API | 已完成 | 已实现并验证 `server/index.ts` |
+| React 页面 | 已完成 | 已实现并验证 Vite + React 页面 |
+| React Flow 可视化 | 未开始 | 待展示节点和边 |
 | RAG Graph 迁移 | 未开始 | 等 LangGraph 基础跑通后再做 |
 
 ## 详细进度
@@ -25,8 +27,8 @@
 | LG-04 | 实现最小图 | 已完成 | START -> receiveQuestion -> generateAnswer -> END |
 | LG-05 | 实现 State 示例 | 已完成 | normalizeQuestion -> analyzeQuestion -> generateAnswer |
 | LG-06 | 实现条件分支 | 已完成 | classifyQuestion -> routeQuestion -> rag/tool/chat |
-| LG-07 | 搭建后端 API | 未开始 | `/api/run-graph` |
-| LG-08 | 搭建 React 页面 | 未开始 | Vite + React + TS |
+| LG-07 | 搭建后端 API | 已完成 | `/api/health`、`/api/graphs`、`/api/graphs/:name/invoke` |
+| LG-08 | 搭建 React 页面 | 已完成 | Vite + React + TS，支持调用后端 Graph |
 | LG-09 | 接入 React Flow | 未开始 | 展示节点和边 |
 | LG-10 | 展示执行日志 | 未开始 | 显示 node 输入输出 |
 | LG-11 | 迁移简化 RAG Graph | 未开始 | rewrite / retrieve / rerank / generate |
@@ -34,15 +36,33 @@
 
 ## 下一步建议
 
-本次已完成条件分支示例。
+本次已完成 React 页面。
 
 已验证命令：
 
 ```powershell
 npm run typecheck
+npm run dev
 npm run dev:simple
 npm run dev:state
 npm run dev:conditional
+npm run dev:server
+npm run dev:web
+npm run build:web
 ```
 
-下一步建议进入 `LG-07`：搭建后端 API，为后续可视化界面提供图执行接口。
+已验证接口：
+
+```text
+GET  /api/health
+GET  /api/graphs
+POST /api/graphs/conditional/invoke
+```
+
+已验证前端：
+
+```text
+http://localhost:5173
+```
+
+下一步建议进入 `LG-09`：接入 React Flow，把 Graph 画成节点和边。

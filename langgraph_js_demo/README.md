@@ -44,16 +44,26 @@
 - 最小 LangGraph
 - State 流转示例
 - 条件分支示例
+- 后端 API
+- React 页面
 
 运行方式：
 
 ```powershell
 cd langgraph_js_demo
 npm install
+npm run dev
+```
+
+如果想单独运行，也可以使用：
+
+```powershell
 npm run typecheck
 npm run dev:simple
 npm run dev:state
 npm run dev:conditional
+npm run dev:server
+npm run dev:web
 ```
 
 当前最小图：
@@ -101,6 +111,59 @@ START
 - `routeQuestion` 是路由函数，负责读取 State 并返回分支 key
 - `addConditionalEdges` 把分支 key 映射到真实节点
 - 不同问题会进入不同 answer 节点
+
+当前后端 API：
+
+```text
+GET  /api/health
+GET  /api/graphs
+POST /api/graphs/:name/invoke
+```
+
+示例请求：
+
+```powershell
+Invoke-RestMethod `
+  -Uri 'http://localhost:3001/api/graphs/conditional/invoke' `
+  -Method Post `
+  -ContentType 'application/json' `
+  -Body '{"question":"RAG 和普通聊天有什么区别？"}'
+```
+
+后端 API 的作用是给后续可视化页面使用。前端可以先调用 `/api/graphs` 获取图列表，再调用 `/api/graphs/:name/invoke` 执行指定图。
+
+当前 React 页面：
+
+```text
+http://localhost:5173
+```
+
+一键启动后访问：
+
+```text
+http://localhost:5173
+```
+
+如果需要拆开运行，可以使用：
+
+```powershell
+# 终端 1
+npm run dev:server
+
+# 终端 2
+npm run dev:web
+```
+
+页面当前支持：
+
+- 加载后端 Graph 列表
+- 选择 `simple` / `state` / `conditional`
+- 输入问题
+- 调用对应 Graph
+- 展示 `steps`
+- 展示最终 State JSON
+
+下一步会接入 React Flow，把这些 Graph 画成节点和边。
 
 ## 初始目录规划
 

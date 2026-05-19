@@ -4,6 +4,10 @@
   "private": true,
   "type": "module",
   "scripts": {
+    "dev": "concurrently -n API,WEB -c cyan,green \"npm run dev:server\" \"npm run dev:web\"",
+    "dev:server": "tsx server/index.ts",
+    "dev:web": "vite --host 0.0.0.0 --port 5173",
+    "build:web": "vite build",
     "dev:simple": "tsx server/graphs/simpleGraph.ts",
     "dev:state": "tsx server/graphs/stateGraph.ts",
     "dev:conditional": "tsx server/graphs/conditionalGraph.ts",
@@ -12,10 +16,17 @@
   "dependencies": {
     "@langchain/core": "^1.0.0",
     "@langchain/langgraph": "^1.0.0",
-    "dotenv": "^17.2.3"
+    "@vitejs/plugin-react": "^6.0.2",
+    "dotenv": "^17.2.3",
+    "react": "^19.2.6",
+    "react-dom": "^19.2.6",
+    "vite": "^8.0.13"
   },
   "devDependencies": {
     "@types/node": "^24.0.0",
+    "@types/react": "^19.2.14",
+    "@types/react-dom": "^19.2.3",
+    "concurrently": "^9.2.1",
     "tsx": "^4.20.0",
     "typescript": "^5.9.0"
   }
