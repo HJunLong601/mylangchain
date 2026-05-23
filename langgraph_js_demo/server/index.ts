@@ -1,6 +1,11 @@
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { URL } from "node:url";
 import { getGraphDefinition, listGraphs, type GraphInput } from "./graphs/registry.js";
+import {
+  createLearningNote,
+  listLearningNotes,
+  type CreateLearningNoteInput,
+} from "./lib/learningStore.js";
 
 // 这是给后续可视化页面使用的最小后端 API。
 //
@@ -10,6 +15,8 @@ import { getGraphDefinition, listGraphs, type GraphInput } from "./graphs/regist
 // 当前提供两个接口：
 // - GET  /api/graphs: 查看当前支持哪些 graph
 // - POST /api/graphs/:name/invoke: 执行某个 graph
+// - GET  /api/learning/notes: 查看学习笔记
+// - POST /api/learning/notes: 新增学习笔记
 
 const DEFAULT_PORT = 3001;
 
@@ -53,6 +60,23 @@ async function parseJsonBody(request: IncomingMessage): Promise<GraphInput> {
   const body = JSON.parse(rawBody) as Partial<GraphInput>;
   return {
     question: String(body.question ?? ""),
+    threadId: body.threadId ? String(body.threadId) : undefined,
+  };
+}
+
+async function parseLearningNoteBody(
+  request: IncomingMessage,
+): Promise<CreateLearningNoteInput> {
+  const rawBody = await readRequestBody(request);
+  const body = JSON.parse(rawBody || "{}") as Partial<CreateLearningNoteInput>;
+
+  return {
+    title: String(body.title ?? ""),
+    content: String(body.content ?? ""),
+    kind: body.kind,
+    tags: Array.isArray(body.tags)
+      ? body.tags.map(String)
+      : [],
   };
 }
 
@@ -77,8 +101,9 @@ async function handleInvoke(
     return;
   }
 
-  const graph = graphDefinition.buildGraph();
-  const result = await graph.invoke(input);
+  const result = graphDefinition.invoke
+    ? await graphDefinition.invoke(input)
+    : await graphDefinition.buildGraph().invoke(input);
   sendJson(response, 200, {
     graph: graphDefinition.name,
     input,
@@ -115,6 +140,23 @@ async function handleRequest(
     return;
   }
 
+  if (request.method === "GET" && requestUrl.pathname === "/api/learning/notes") {
+    sendJson(response, 200, {
+      notes: await listLearningNotes(),
+    });
+    return;
+  }
+
+  if (request.method === "POST" && requestUrl.pathname === "/api/learning/notes") {
+    const note = await createLearningNote(
+      await parseLearningNoteBody(request),
+    );
+    sendJson(response, 201, {
+      note,
+    });
+    return;
+  }
+
   const invokeMatch = requestUrl.pathname.match(
     /^\/api\/graphs\/([^/]+)\/invoke$/,
   );
@@ -147,4 +189,6 @@ server.listen(port, () => {
   console.log("GET  /api/health");
   console.log("GET  /api/graphs");
   console.log("POST /api/graphs/:name/invoke");
+  console.log("GET  /api/learning/notes");
+  console.log("POST /api/learning/notes");
 });

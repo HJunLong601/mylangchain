@@ -1,22 +1,19 @@
 {
-  "name": "langgraph-js-demo",
+  "name": "langgraph-agent-workspace",
   "version": "0.1.0",
   "private": true,
   "type": "module",
   "scripts": {
     "dev": "concurrently -n API,WEB -c cyan,green \"npm run dev:server\" \"npm run dev:web\"",
     "dev:server": "tsx server/index.ts",
-    "dev:web": "vite --host 0.0.0.0 --port 5173",
+    "dev:web": "vite --host 0.0.0.0 --port 5174",
     "build:web": "vite build",
-    "dev:simple": "tsx server/graphs/simpleGraph.ts",
-    "dev:state": "tsx server/graphs/stateGraph.ts",
-    "dev:conditional": "tsx server/graphs/conditionalGraph.ts",
-    "dev:memory": "tsx server/graphs/memoryGraph.ts",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
     "@langchain/core": "^1.0.0",
     "@langchain/langgraph": "^1.0.0",
+    "@langchain/openai": "^1.0.0",
     "@vitejs/plugin-react": "^6.0.2",
     "dotenv": "^17.2.3",
     "react": "^19.2.6",

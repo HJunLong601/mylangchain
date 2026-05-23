@@ -1,4 +1,6 @@
+import type { BaseMessage } from "@langchain/core/messages";
 import { buildConditionalGraph } from "./conditionalGraph.js";
+import { memoryGraph } from "./memoryGraph.js";
 import { buildSimpleGraph } from "./simpleGraph.js";
 import { buildStateDemoGraph } from "./stateGraph.js";
 
@@ -7,10 +9,11 @@ import { buildStateDemoGraph } from "./stateGraph.js";
 // 这样后续做可视化页面时，不需要在前端写死有哪些图，
 // 只要请求 GET /api/graphs 就能拿到列表。
 
-export type GraphName = "simple" | "state" | "conditional";
+export type GraphName = "simple" | "state" | "conditional" | "memory";
 
 export type GraphInput = {
   question: string;
+  threadId?: string;
 };
 
 export type GraphDefinition = {
@@ -23,6 +26,7 @@ export type GraphDefinition = {
     | typeof buildStateDemoGraph
     | typeof buildConditionalGraph
   >;
+  invoke?: (input: GraphInput) => Promise<unknown>;
 };
 
 export const graphRegistry: Record<GraphName, GraphDefinition> = {
@@ -52,6 +56,43 @@ export const graphRegistry: Record<GraphName, GraphDefinition> = {
       question: "上海今天的天气怎么样？",
     },
     buildGraph: buildConditionalGraph,
+  },
+  memory: {
+    name: "memory",
+    title: "短期记忆 Graph",
+    description: "演示 MemorySaver、MessagesAnnotation 和 thread_id。",
+    defaultInput: {
+      question: "我叫小龙。",
+      threadId: "demo-thread",
+    },
+    buildGraph: () => memoryGraph as never,
+    async invoke(input) {
+      const result = await memoryGraph.invoke(
+        {
+          messages: [
+            {
+              role: "user",
+              content: input.question,
+            },
+          ],
+        },
+        {
+          configurable: {
+            thread_id: input.threadId || "demo-thread",
+          },
+        },
+      );
+
+      return {
+        ...result,
+        // BaseMessage 直接 JSON.stringify 时字段很多。
+        // 这里额外给前端一个更适合学习观察的轻量列表。
+        messageView: result.messages.map((message: BaseMessage) => ({
+          type: message.getType(),
+          content: message.content,
+        })),
+      };
+    },
   },
 };
 

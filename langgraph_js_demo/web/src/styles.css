@@ -17,6 +17,7 @@ body {
 
 button,
 select,
+input,
 textarea {
   font: inherit;
 }
@@ -63,6 +64,13 @@ textarea {
   gap: 24px;
 }
 
+.learning-grid {
+  display: grid;
+  grid-template-columns: minmax(280px, 460px) minmax(0, 1fr);
+  gap: 24px;
+  margin-top: 24px;
+}
+
 .panel {
   border: 1px solid rgba(29, 37, 47, 0.12);
   border-radius: 24px;
@@ -72,6 +80,13 @@ textarea {
 }
 
 .control-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+  padding: 24px;
+}
+
+.note-editor {
   display: flex;
   flex-direction: column;
   gap: 18px;
@@ -92,6 +107,7 @@ label {
 }
 
 select,
+input,
 textarea {
   width: 100%;
   border: 1px solid rgba(51, 65, 85, 0.18);
@@ -138,6 +154,11 @@ button:disabled {
   padding: 24px;
 }
 
+.notes-panel {
+  min-width: 0;
+  padding: 24px;
+}
+
 .panel-header {
   display: flex;
   align-items: center;
@@ -179,12 +200,60 @@ pre {
   line-height: 1.55;
 }
 
+.note-list {
+  display: grid;
+  gap: 14px;
+}
+
+.note-card {
+  border: 1px solid rgba(31, 111, 98, 0.14);
+  border-radius: 18px;
+  padding: 16px;
+  background: rgba(255, 250, 242, 0.74);
+}
+
+.note-card h3 {
+  margin: 10px 0 8px;
+  color: #17212b;
+}
+
+.note-card p {
+  max-height: 180px;
+  overflow: auto;
+  white-space: pre-wrap;
+  color: #475467;
+  line-height: 1.7;
+}
+
+.note-meta,
+.tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+}
+
+.note-meta strong,
+.tags span {
+  border-radius: 999px;
+  padding: 4px 10px;
+  color: #1f6f62;
+  background: rgba(31, 111, 98, 0.12);
+  font-size: 13px;
+}
+
+.note-meta span {
+  color: #667085;
+  font-size: 13px;
+}
+
 @media (max-width: 900px) {
   .app-shell {
     padding: 24px;
   }
 
   .workspace,
+  .learning-grid,
   .result-grid {
     grid-template-columns: 1fr;
   }
