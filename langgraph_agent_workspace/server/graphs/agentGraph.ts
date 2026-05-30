@@ -14,11 +14,27 @@ import type { AgentIntent, AgentMessage, DebugEvent, LearningNote } from "../typ
 //
 // 之后工具调用、RAG、持久化会继续加到这张图上，而不是再新增一堆分散 demo。
 
+// 这两个特殊标记只用于“清空本轮调试信息”。
+//
+// 因为 MemorySaver 会把整个 State 按 thread_id 保存下来，
+// 如果 steps/debug 一直使用 concat 追加，第二轮、第三轮会把旧日志也带出来。
+// 所以 prepareTurnNode 会先写入 RESET 标记，reducer 看到后就只保留本轮日志。
 const RESET_STEPS = "__RESET_STEPS__";
 const RESET_DEBUG = "__RESET_DEBUG__";
 
+// MemorySaver 是 LangGraph 提供的内存版 checkpointer。
+//
+// 它会按照 configurable.thread_id 保存每个会话的 State。
+// 注意：这是“进程内短期记忆”，服务重启后数据会丢。
+// 后续做真正可用的长期记忆时，可以换成 SQLite / Postgres 等持久化 checkpointer。
 const checkpointer = new MemorySaver();
 
+// Annotation.Root 用来定义这张图的 State 结构。
+//
+// 可以把 State 理解成“Agent 运行过程中的共享上下文”：
+// - 每个节点都能读取 State
+// - 每个节点只返回自己要更新的字段
+// - LangGraph 根据字段规则把局部更新合并回完整 State
 const AgentState = Annotation.Root({
   // 本轮用户输入。每次 POST /api/agent/chat 都会传入新的 question。
   question: Annotation<string>,
@@ -41,6 +57,8 @@ const AgentState = Annotation.Root({
 
   // 本轮命中的学习笔记。后续接 RAG 时，这里可以换成 retrievedDocuments。
   retrievedNotes: Annotation<LearningNote[]>({
+    // 检索结果只关心“本轮命中内容”，不需要累计历史命中。
+    // 所以这里不是 concat，而是直接用本轮 update 覆盖旧值。
     reducer: (_current, update) => update,
     default: () => [],
   }),
@@ -54,6 +72,11 @@ const AgentState = Annotation.Root({
   // answer 节点再返回一条 assistant message；
   // 在同一个 thread_id 下，MemorySaver 会把这些 messages 保留下来。
   messages: Annotation<AgentMessage[]>({
+    // reducer 不是 TypeScript 自带语法，而是 LangGraph 的 State 合并规则。
+    //
+    // currentMessages 是旧 State 中的消息历史；
+    // newMessages 是本轮节点返回的新消息；
+    // concat 表示把新消息追加到旧消息后面，从而形成多轮对话上下文。
     reducer: (currentMessages, newMessages) => currentMessages.concat(newMessages),
     default: () => [],
   }),
@@ -89,6 +112,12 @@ const AgentState = Annotation.Root({
 export type AgentStateType = typeof AgentState.State;
 
 function prepareTurnNode(state: AgentStateType) {
+  // prepareTurn 是每轮对话的入口节点。
+  //
+  // 它不负责回答问题，只做三件事：
+  // 1. 清理和规范化用户输入
+  // 2. 重置上一轮的临时字段
+  // 3. 写入本轮调试日志
   const normalizedQuestion = state.question.trim().replace(/\s+/g, " ").toLowerCase();
 
   return {
@@ -119,6 +148,10 @@ function prepareTurnNode(state: AgentStateType) {
 }
 
 function classifyIntentNode(state: AgentStateType) {
+  // classifyIntent 是当前版本的“意图识别”节点。
+  //
+  // 这里先用关键词规则实现，方便学习条件分支。
+  // 后续可以替换成模型分类、结构化输出，或者更复杂的路由器。
   const question = state.normalizedQuestion;
 
   let intent: AgentIntent = "chat";
@@ -167,6 +200,10 @@ function routeByIntent(state: AgentStateType): AgentIntent {
 }
 
 async function saveNoteNode(state: AgentStateType) {
+  // saveNoteNode 可以理解成当前版本的“工具节点”。
+  //
+  // 它调用 learningStore，把用户输入保存成本地学习笔记。
+  // 后续做标准 Tool 抽象时，可以把 createLearningNote 包装成独立工具。
   const note = await createLearningNote({
     title: `对话沉淀：${state.question.slice(0, 24)}`,
     content: state.question,
@@ -201,6 +238,10 @@ async function saveNoteNode(state: AgentStateType) {
 }
 
 async function searchNotesNode(state: AgentStateType) {
+  // searchNotesNode 是当前版本的“检索节点”。
+  //
+  // 现在只是关键词搜索学习笔记；
+  // 后续接 RAG 时，可以在这里替换成 embedding 检索、向量库召回和 rerank。
   const notes = await searchLearningNotes(state.normalizedQuestion);
 
   const answer = notes.length > 0
@@ -236,6 +277,10 @@ async function searchNotesNode(state: AgentStateType) {
 }
 
 async function chatAnswerNode(state: AgentStateType) {
+  // chatAnswerNode 是普通对话分支。
+  //
+  // 如果配置了 OpenAI 兼容模型，这里会调用真实模型；
+  // 如果没有配置 API Key，则走本地规则回复，保证项目可以零配置跑通。
   const answer = await generateAssistantReply(state.question, state.messages);
 
   return {
@@ -261,14 +306,30 @@ async function chatAnswerNode(state: AgentStateType) {
 }
 
 export function buildAgentGraph() {
+  // StateGraph 是 LangGraph 的图构建器。
+  //
+  // 下面这段可以按四层理解：
+  // 1. new StateGraph(AgentState): 声明这张图使用哪种 State
+  // 2. addNode: 注册业务节点，但还不决定执行顺序
+  // 3. addEdge / addConditionalEdges: 定义节点之间怎么流转
+  // 4. compile: 编译成可以 invoke 的可执行对象
   return new StateGraph(AgentState)
+    // addNode(name, fn): 给图注册一个节点。
+    // 节点函数读取完整 State，返回局部 State 更新。
     .addNode("prepareTurn", prepareTurnNode)
     .addNode("classifyIntent", classifyIntentNode)
     .addNode("saveNote", saveNoteNode)
     .addNode("searchNotes", searchNotesNode)
     .addNode("chatAnswer", chatAnswerNode)
+    // addEdge(from, to): 定义固定流转路线。
+    // START / END 是 LangGraph 提供的虚拟起点和终点，不是业务函数。
     .addEdge(START, "prepareTurn")
     .addEdge("prepareTurn", "classifyIntent")
+    // addConditionalEdges 用来定义条件分支。
+    //
+    // classifyIntent 执行完后，LangGraph 会调用 routeByIntent(state)。
+    // routeByIntent 返回 "chat" / "save_note" / "search_notes"，
+    // 再通过下面的映射进入对应节点。
     .addConditionalEdges("classifyIntent", routeByIntent, {
       save_note: "saveNote",
       search_notes: "searchNotes",

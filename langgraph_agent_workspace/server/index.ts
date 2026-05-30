@@ -27,6 +27,11 @@ function sendJson(
   statusCode: number,
   body: unknown,
 ) {
+  // 这里统一封装 JSON 返回，避免每个接口重复设置响应头。
+  //
+  // Access-Control-Allow-Origin 是为了让 Vite 前端端口 5174
+  // 可以访问 Node 后端端口 3002。生产环境不要直接写 "*"，
+  // 应该限制为自己的前端域名。
   response.writeHead(statusCode, {
     "Content-Type": "application/json; charset=utf-8",
     "Access-Control-Allow-Origin": "*",
@@ -37,6 +42,8 @@ function sendJson(
 }
 
 function readRequestBody(request: IncomingMessage): Promise<string> {
+  // Node 原生 http 的请求体是流式读取的。
+  // 这里把多个 chunk 拼成完整字符串，后面再交给 JSON.parse。
   return new Promise((resolve, reject) => {
     const chunks: Buffer[] = [];
 
@@ -51,6 +58,8 @@ function readRequestBody(request: IncomingMessage): Promise<string> {
 }
 
 async function parseJsonBody<T>(request: IncomingMessage): Promise<Partial<T>> {
+  // 这里用泛型 T 只是为了让调用处获得类型提示。
+  // 它不会在运行时自动校验 JSON 结构，生产环境应配合 zod 等库做参数校验。
   const rawBody = await readRequestBody(request);
   if (!rawBody.trim()) {
     return {};
@@ -85,7 +94,9 @@ async function handleAgentChat(
 
   const state = await agentGraph.invoke(
     {
+      // question 是本轮输入，给 prepareTurn/classifyIntent 等节点使用。
       question: message,
+      // messages 会被 AgentState.messages 的 reducer 追加到历史消息里。
       messages: [
         {
           role: "user",
@@ -95,6 +106,8 @@ async function handleAgentChat(
     },
     {
       configurable: {
+        // thread_id 是 LangGraph checkpointer 识别会话的关键。
+        // 同一个 thread_id 会恢复同一份短期记忆；换一个就是新会话。
         thread_id: threadId,
       },
     },

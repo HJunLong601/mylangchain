@@ -21,6 +21,8 @@ type LearningNote = {
 };
 
 type AgentDebugState = {
+  // debugState 是后端专门返回给学习/调试面板看的数据。
+  // 真实产品里可以隐藏这些字段，只保留 answer 和必要的消息历史。
   intent: string;
   routeReason: string;
   toolResult: string;
@@ -71,7 +73,7 @@ export function App() {
     }
   }
 
-  async function sendMessage() {
+async function sendMessage() {
     const message = input.trim();
     if (!message) {
       setError("请输入要发送给 Agent 的内容。");
@@ -93,6 +95,7 @@ export function App() {
         },
         body: JSON.stringify({
           message,
+          // 保持同一个 threadId，后端 LangGraph 才能恢复同一个会话的短期记忆。
           threadId,
         }),
       });

@@ -15,6 +15,8 @@ const baseURL = process.env.OPENAI_BASE_URL || process.env.GLM_BASE_URL;
 const modelName = process.env.OPENAI_MODEL || process.env.GLM_MODEL || "glm-5";
 
 function buildSystemPrompt() {
+  // System Prompt 用来约束模型的角色和回答风格。
+  // 它不是用户消息，而是每次模型调用时额外传入的系统规则。
   return [
     "你是一个个人学习 Agent，主要帮助用户学习 LangChain、LangGraph、RAG 和 Agent 工程化。",
     "回答要简洁、清楚，优先给出可执行建议。",
@@ -23,6 +25,10 @@ function buildSystemPrompt() {
 }
 
 function toLangChainMessages(messages: AgentMessage[]) {
+  // 项目内部使用简单的 { role, content }。
+  // 调用 LangChain 模型前，需要转换成 LangChain 的消息类型：
+  // - user -> HumanMessage
+  // - assistant -> AIMessage
   return messages.map((message) => {
     if (message.role === "user") {
       return new HumanMessage(message.content);
@@ -47,11 +53,15 @@ export async function generateAssistantReply(
   question: string,
   history: AgentMessage[],
 ): Promise<string> {
+  // 没有 API Key 时走本地规则回复。
+  // 这样学习 LangGraph 主链路时，不会被模型配置、网络或余额问题卡住。
   if (!apiKey) {
     return generateLocalReply(question, history);
   }
 
   const model = new ChatOpenAI({
+    // ChatOpenAI 是 LangChain 提供的 OpenAI 风格聊天模型封装。
+    // 如果服务商兼容 OpenAI 协议，只要替换 apiKey/baseURL/model 即可复用这套代码。
     apiKey,
     model: modelName,
     temperature: 0.2,
