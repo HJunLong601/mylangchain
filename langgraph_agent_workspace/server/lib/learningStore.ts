@@ -51,6 +51,113 @@ function normalizeTags(tags: string[] | undefined) {
   return [...new Set((tags ?? []).map((tag) => tag.trim()).filter(Boolean))];
 }
 
+const GENERIC_NOTE_QUERY_WORDS = [
+  "笔记",
+  "内容",
+  "有什么",
+  "有哪些",
+  "什么",
+  "查询",
+  "看看",
+  "一下",
+  "之前",
+  "里面",
+  "所有",
+  "全部",
+  "我的",
+  "保存",
+  "记录",
+];
+
+const TECHNICAL_SEARCH_KEYWORDS = [
+  "agent",
+  "annotation",
+  "checkpointer",
+  "glm",
+  "langchain",
+  "langgraph",
+  "memory",
+  "messages",
+  "prompt",
+  "rag",
+  "reducer",
+  "state",
+  "thread",
+  "thread_id",
+  "tool",
+  "分支",
+  "向量",
+  "工具",
+  "模型",
+  "检索",
+  "条件",
+  "状态",
+  "短期记忆",
+  "知识库",
+  "记忆",
+];
+
+function normalizeSearchText(text: string) {
+  return text.trim().toLowerCase();
+}
+
+function extractSearchKeywords(query: string) {
+  const normalizedQuery = normalizeSearchText(query);
+  const keywords = new Set<string>();
+
+  // 英文、数字、下划线一类技术词可以直接按单词提取，例如 state / reducer / thread_id。
+  for (const keyword of normalizedQuery.match(/[a-z0-9_]+/g) ?? []) {
+    if (!GENERIC_NOTE_QUERY_WORDS.includes(keyword)) {
+      keywords.add(keyword);
+    }
+  }
+
+  // 中文没有天然空格，不能只依赖 split。
+  // 这里先维护一组当前学习阶段常见技术词，后续接 RAG 后会替换成 embedding 检索。
+  for (const keyword of TECHNICAL_SEARCH_KEYWORDS) {
+    if (normalizedQuery.includes(keyword.toLowerCase())) {
+      keywords.add(keyword.toLowerCase());
+    }
+  }
+
+  // 如果用户用空格或标点手动分隔了关键词，也尽量保留下来。
+  for (const keyword of normalizedQuery.split(/\s+|，|,|。|\?|？|、/)) {
+    const cleanKeyword = keyword.trim();
+    if (
+      cleanKeyword
+      && cleanKeyword.length > 1
+      && !GENERIC_NOTE_QUERY_WORDS.some((word) => cleanKeyword.includes(word))
+    ) {
+      keywords.add(cleanKeyword);
+    }
+  }
+
+  return [...keywords];
+}
+
+function isGeneralNoteListQuery(query: string, keywords: string[]) {
+  const normalizedQuery = normalizeSearchText(query);
+  const isAskingNotes = [
+    "笔记",
+    "记录",
+    "保存",
+  ].some((word) => normalizedQuery.includes(word));
+  const isAskingListOrContent = [
+    "有什么",
+    "有哪些",
+    "内容",
+    "全部",
+    "所有",
+    "列表",
+    "记录了什么",
+    "保存了什么",
+  ].some((word) => normalizedQuery.includes(word));
+
+  // 如果没有提取到具体主题词，且用户是在问“笔记里有什么”，
+  // 就应该返回最近笔记，而不是拿整句去模糊匹配。
+  return isAskingNotes && isAskingListOrContent && keywords.length === 0;
+}
+
 export async function listLearningNotes(): Promise<LearningNote[]> {
   const notes = await readNotesFromFile();
 
@@ -80,17 +187,16 @@ export async function createLearningNote(
 }
 
 export async function searchLearningNotes(query: string, limit = 5): Promise<LearningNote[]> {
-  const keywords = query
-    .toLowerCase()
-    .split(/\s+|，|,|。|\?|？/)
-    .map((keyword) => keyword.trim())
-    .filter(Boolean);
+  const notes = await listLearningNotes();
+  const keywords = extractSearchKeywords(query);
+
+  if (isGeneralNoteListQuery(query, keywords)) {
+    return notes.slice(0, limit);
+  }
 
   if (keywords.length === 0) {
     return [];
   }
-
-  const notes = await listLearningNotes();
 
   return notes
     .map((note) => {

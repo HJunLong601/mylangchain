@@ -1,1 +1,108 @@
-[]
+[
+  {
+    "id": "note_9be8cf9c-c501-4393-9792-699d7648124f",
+    "title": "LangGraph State 实操指南：定义、节点与避坑",
+    "content": "### 核心步骤\n1. **定义 Schema**: 使用 `TypedDict` 定义结构。\n   - 默认字段为覆盖模式。\n   - 使用 `Annotated[list, add_messages]` 实现消息追加模式。\n2. **编写节点**: 函数接收 `state` 参数，返回字典用于更新。\n   - 读取：`state['key']`。\n   - 更新：`return {\"key\": new_value}`。\n3. **构建图**: 使用 `StateGraph(StateSchema)` 初始化，添加节点和边，最后 `compile()`。\n\n### 代码示例\n```python\nfrom typing import TypedDict, Annotated\nfrom langgraph.graph import add_messages, StateGraph, END\n\nclass AgentState(TypedDict):\n    messages: Annotated[list, add_messages]\n    user_input: str\n\ndef my_node(state: AgentState):\n    # 业务逻辑\n    return {\"messages\": [{\"role\": \"ai\", \"content\": \"...\"}]}\n\nworkflow = StateGraph(AgentState)\nworkflow.add_node(\"process\", my_node)\n# ... 设置入口和边 ...\napp = workflow.compile()\n```\n\n### ⚠️ 避坑点\n- **不可变性**: 节点内禁止直接修改 `state` 对象，必须通过返回值更新。\n- **Reducer 选择**: 聊天记录用 `add_messages` (追加)，当前状态用默认类型 (覆盖)。",
+    "kind": "observation",
+    "tags": [
+      "agent",
+      "conversation",
+      "model_history_extraction",
+      "langgraph",
+      "state",
+      "python",
+      "tutorial"
+    ],
+    "createdAt": "2026-06-07T09:53:30.295Z",
+    "updatedAt": "2026-06-07T09:53:30.295Z"
+  },
+  {
+    "id": "note_dd259640-5dd0-4c8b-a6a7-af1c2b52ab8f",
+    "title": "LangGraph State 核心概念与用法",
+    "content": "### 核心定义\nState 是图在节点间传递的“共享记忆”，保存上下文信息，所有节点均可读写。\n\n### 定义方式\n使用 `TypedDict` 定义结构。\n\n### 更新机制\n1. **默认覆盖**：节点返回值直接覆盖 State 中对应字段。\n2. **追加模式**：使用 `Annotated` 配合 Reducer（如 `add_messages`），常用于对话历史列表。\n\n### 代码示例\n```python\nfrom typing import TypedDict, Annotated\nfrom langgraph.graph import add_messages\n\nclass GraphState(TypedDict):\n    messages: Annotated[list, add_messages] # 追加\n    user_input: str # 覆盖\n```",
+    "kind": "observation",
+    "tags": [
+      "agent",
+      "conversation",
+      "model_history_extraction",
+      "langgraph",
+      "state",
+      "reducer",
+      "memory"
+    ],
+    "createdAt": "2026-06-07T09:48:12.800Z",
+    "updatedAt": "2026-06-07T09:48:12.800Z"
+  },
+  {
+    "id": "note_183e21ea-6855-4133-b0f5-5359ca23f924",
+    "title": "对话沉淀：我看到回答的内容没有保存到笔记",
+    "content": "我看到回答的内容没有保存到笔记",
+    "kind": "observation",
+    "tags": [
+      "agent",
+      "conversation"
+    ],
+    "createdAt": "2026-06-07T09:41:30.038Z",
+    "updatedAt": "2026-06-07T09:41:30.038Z"
+  },
+  {
+    "id": "note_26fc4174-03c1-4464-8165-059703e4abce",
+    "title": "对话沉淀：什么是langgraph的state？保存到笔记",
+    "content": "什么是langgraph的state？保存到笔记",
+    "kind": "observation",
+    "tags": [
+      "agent",
+      "conversation"
+    ],
+    "createdAt": "2026-06-07T09:40:20.911Z",
+    "updatedAt": "2026-06-07T09:40:20.911Z"
+  },
+  {
+    "id": "note_74863d54-66ad-4481-bfed-0a2053c666aa",
+    "title": "对话沉淀：将上面回答的内容保存到笔记",
+    "content": "将上面回答的内容保存到笔记",
+    "kind": "observation",
+    "tags": [
+      "agent",
+      "conversation"
+    ],
+    "createdAt": "2026-06-07T09:40:06.278Z",
+    "updatedAt": "2026-06-07T09:40:06.278Z"
+  },
+  {
+    "id": "note_f2b3ebed-5a78-4590-82a8-d7da1e9dd2f1",
+    "title": "对话沉淀：保存到笔记",
+    "content": "保存到笔记",
+    "kind": "observation",
+    "tags": [
+      "agent",
+      "conversation"
+    ],
+    "createdAt": "2026-06-07T09:39:46.635Z",
+    "updatedAt": "2026-06-07T09:39:46.635Z"
+  },
+  {
+    "id": "note_446b8481-2a4b-4a01-9b67-993e7b068372",
+    "title": "对话沉淀：将刚刚的state的内容保存到笔记",
+    "content": "将刚刚的state的内容保存到笔记",
+    "kind": "observation",
+    "tags": [
+      "agent",
+      "conversation"
+    ],
+    "createdAt": "2026-06-07T09:22:02.914Z",
+    "updatedAt": "2026-06-07T09:22:02.914Z"
+  },
+  {
+    "id": "note_3aacddd2-1e99-46eb-9905-4c7d82b9754b",
+    "title": "对话沉淀：保存到笔记",
+    "content": "保存到笔记",
+    "kind": "observation",
+    "tags": [
+      "agent",
+      "conversation"
+    ],
+    "createdAt": "2026-06-07T09:20:56.780Z",
+    "updatedAt": "2026-06-07T09:20:56.780Z"
+  }
+]

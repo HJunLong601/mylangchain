@@ -1,6 +1,9 @@
 import { Annotation, END, MemorySaver, START, StateGraph } from "@langchain/langgraph";
 import { pathToFileURL } from "node:url";
-import { generateAssistantReply } from "../lib/assistantModel.js";
+import {
+  extractLearningNoteDraftFromHistory,
+  generateAssistantReply,
+} from "../lib/assistantModel.js";
 import { createLearningNote, searchLearningNotes } from "../lib/learningStore.js";
 import type { AgentIntent, AgentMessage, DebugEvent, LearningNote } from "../types.js";
 
@@ -199,21 +202,163 @@ function routeByIntent(state: AgentStateType): AgentIntent {
   return state.intent;
 }
 
+type NoteContentSource =
+  | "model_history_extraction"
+  | "explicit_user_content"
+  | "previous_assistant_answer"
+  | "current_user_message";
+
+type NoteContentCandidate = {
+  title: string;
+  content: string;
+  source: NoteContentSource;
+  reason: string;
+  tags: string[];
+};
+
+function extractExplicitNoteContent(question: string): string | undefined {
+  // 用户明确写出要保存的内容时，通常会使用冒号：
+  // - 保存这句话：State 是节点之间共享的数据
+  // - 把这段内容保存到笔记: reducer 决定 State 如何合并
+  //
+  // 这种情况下应该优先保存冒号后面的正文，而不是保存整条命令。
+  const separatorIndex = Math.min(
+    ...["：", ":"]
+      .map((separator) => question.indexOf(separator))
+      .filter((index) => index >= 0),
+  );
+
+  if (!Number.isFinite(separatorIndex)) {
+    return undefined;
+  }
+
+  const content = question.slice(separatorIndex + 1).trim();
+  return content.length > 0 ? content : undefined;
+}
+
+function isAskingToSavePreviousAnswer(question: string) {
+  // 这类表达本质上是在引用短期记忆里的上一条 assistant 回复：
+  // - 保存上面回答
+  // - 将刚才的内容保存到笔记
+  // - 把上一条回答记一下
+  const normalizedQuestion = question.toLowerCase();
+  return [
+    "上面",
+    "刚才",
+    "上一条",
+    "前面",
+    "回答",
+    "内容",
+    "这段",
+  ].some((keyword) => normalizedQuestion.includes(keyword));
+}
+
+function findLatestAssistantMessage(messages: AgentMessage[]) {
+  // 当前 saveNoteNode 执行时，messages 里通常已经包含：
+  // 历史 user / assistant 消息 + 本轮 user 消息。
+  //
+  // 因此从后往前找最近一条 assistant，即可拿到“上面回答”的内容。
+  return [...messages]
+    .reverse()
+    .find((message) => {
+      if (message.role !== "assistant" || !message.content.trim()) {
+        return false;
+      }
+
+      // 如果用户连续多次保存，最近一条 assistant 可能是“已经帮你保存为学习笔记”。
+      // 这类确认消息不适合作为下一次保存的正文，所以要跳过。
+      return !message.content.startsWith("已经帮你保存为学习笔记。");
+    });
+}
+
+function resolveNoteContentByRule(state: AgentStateType): NoteContentCandidate {
+  const explicitContent = extractExplicitNoteContent(state.question);
+  if (explicitContent) {
+    return {
+      title: `对话沉淀：${explicitContent.slice(0, 24)}`,
+      content: explicitContent,
+      source: "explicit_user_content",
+      reason: "用户在冒号后明确提供了要保存的内容",
+      tags: ["agent", "conversation", "explicit_user_content"],
+    };
+  }
+
+  const latestAssistantMessage = findLatestAssistantMessage(state.messages);
+  if (isAskingToSavePreviousAnswer(state.question) && latestAssistantMessage) {
+    return {
+      title: `回答沉淀：${latestAssistantMessage.content.slice(0, 24)}`,
+      content: latestAssistantMessage.content,
+      source: "previous_assistant_answer",
+      reason: "用户引用了上面/刚才/上一条回答，因此保存最近一条 assistant 回复",
+      tags: ["agent", "conversation", "previous_assistant_answer"],
+    };
+  }
+
+  // 兜底策略：如果用户只是说“保存这段知识”，但没有历史 assistant 回复，
+  // 就保存本轮用户输入，避免工具什么都不做。
+  // 后续可以进一步优化成“追问用户要保存哪段内容”。
+  return {
+    title: `对话沉淀：${state.question.slice(0, 24)}`,
+    content: state.question,
+    source: "current_user_message",
+    reason: "没有解析到明确内容或上一条 assistant 回复，兜底保存本轮用户输入",
+    tags: ["agent", "conversation", "current_user_message"],
+  };
+}
+
+async function resolveNoteContent(state: AgentStateType): Promise<NoteContentCandidate> {
+  // 优先使用模型根据历史对话智能提取笔记。
+  //
+  // 这样用户说：
+  // - “把刚才 reducer 的重点保存一下”
+  // - “将上面回答的内容保存到笔记”
+  //
+  // 模型可以结合最近几轮 messages，选择真正应该保存的内容，
+  // 并整理出更适合复习的标题、正文和标签。
+  try {
+    const modelDraft = await extractLearningNoteDraftFromHistory(
+      state.question,
+      state.messages,
+    );
+
+    if (modelDraft) {
+      return {
+        title: modelDraft.title,
+        content: modelDraft.content,
+        source: "model_history_extraction",
+        reason: modelDraft.reason,
+        tags: ["agent", "conversation", "model_history_extraction", ...modelDraft.tags],
+      };
+    }
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    console.warn(`模型提取学习笔记失败，回退到规则解析：${message}`);
+  }
+
+  // 没有配置模型，或模型返回结果不可解析时，回退到规则版。
+  // 这样保存笔记功能不会因为模型异常而完全不可用。
+  return resolveNoteContentByRule(state);
+}
+
 async function saveNoteNode(state: AgentStateType) {
   // saveNoteNode 可以理解成当前版本的“工具节点”。
   //
-  // 它调用 learningStore，把用户输入保存成本地学习笔记。
+  // 它调用 learningStore，把解析出来的内容保存成本地学习笔记。
+  // 注意：这里不能简单保存 state.question。
+  // 因为用户可能会说“保存上面回答”，这时真正要保存的是短期记忆里的上一条 assistant 回复。
   // 后续做标准 Tool 抽象时，可以把 createLearningNote 包装成独立工具。
+  const noteContent = await resolveNoteContent(state);
   const note = await createLearningNote({
-    title: `对话沉淀：${state.question.slice(0, 24)}`,
-    content: state.question,
+    title: noteContent.title,
+    content: noteContent.content,
     kind: "observation",
-    tags: ["agent", "conversation"],
+    tags: noteContent.tags,
   });
 
   const answer = [
     "已经帮你保存为学习笔记。",
     `标题：${note.title}`,
+    `保存来源：${noteContent.reason}`,
     "后续你可以问我“之前的笔记里有什么”，我会从本地笔记里检索。",
   ].join("\n");
 
@@ -226,12 +371,15 @@ async function saveNoteNode(state: AgentStateType) {
         content: answer,
       },
     ],
-    steps: ["saveNote: 调用学习笔记工具并保存成功"],
+    steps: [`saveNote: 调用学习笔记工具并保存成功，source=${noteContent.source}`],
     debug: [
       {
         node: "saveNote",
         message: "调用本地学习笔记保存工具",
-        data: note,
+        data: {
+          note,
+          resolvedContent: noteContent,
+        },
       },
     ],
   };
