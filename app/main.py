@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+from dataclasses import dataclass
 
 from dotenv import load_dotenv
 from langchain.agents import create_agent
@@ -10,6 +11,7 @@ from langchain.agents.structured_output import ToolStrategy
 from langchain_openai import ChatOpenAI
 
 from app.rag import (
+    RagSearchResult,
     format_scored_search_results,
     rerank_search_results,
     search_knowledge_with_scores,
@@ -44,6 +46,64 @@ DIRECT_RAG_MAX_RESULTS = 3
 DEFAULT_RAG_RETRIEVAL_CANDIDATES = 8
 DEFAULT_RAG_QUERY_REWRITE_ENABLED = True
 DEFAULT_RAG_REWRITE_HISTORY_MESSAGES = 6
+
+
+@dataclass(frozen=True)
+class DirectRagPayload:
+    """
+    一次直接 Prompt RAG 的中间结果。
+
+    这个结构主要服务两个场景：
+    1. CLI 对话：只需要拿 prompt 继续传给 agent。
+    2. RAGAS 评估：除了 prompt，还需要拿到检索 query、contexts、sources 等评估材料。
+
+    为什么不让 build_direct_rag_prompt(...) 直接返回字符串之外的一堆散装变量：
+    - dataclass 能把这些字段打包成一个“有名字的数据对象”
+    - 后面新增评估字段时，不需要改变很多函数参数
+    - 调试时打印这个对象，也比多个临时变量更直观
+    """
+
+    # 用户真实输入的问题。它用于最终回答，不能被 Query Rewrite 覆盖。
+    original_question: str
+    # 实际送去向量库检索的问题。开启 Query Rewrite 时，它可能不同于 original_question。
+    retrieval_query: str
+    # 最终放进 HumanMessage 的增强 Prompt，里面包含检索结果和回答规则。
+    prompt: str
+    # 已格式化的知识库上下文，主要用于日志观察。
+    retrieved_context: str
+    # 最终经过阈值过滤和 Rerank 后进入 Prompt 的结果。
+    # RAGAS 会从这里提取 retrieved_contexts。
+    results: list[RagSearchResult]
+    # 第一阶段向量召回里通过 distance 阈值的候选数量。
+    # 它不一定等于 results 数量，因为后面还会做 Top N Rerank。
+    accepted_candidate_count: int
+
+
+@dataclass(frozen=True)
+class RagAnswer:
+    """
+    单轮 RAG 的最终回答结果。
+
+    CLI 平时只关心 answer，但评估系统需要更完整的数据：
+    - question / answer: 用户问题和系统回答
+    - contexts: 进入 Prompt 的证据片段
+    - sources: 证据片段来自哪些知识库文件
+    - retrieval_query: Query Rewrite 后真正用于检索的问题
+    - messages: LangChain 返回的完整消息链，方便必要时继续排查工具调用
+    """
+
+    # 原始用户问题。
+    question: str
+    # 模型最终回复文本。
+    answer: str
+    # 实际用于检索的问题。
+    retrieval_query: str
+    # RAGAS 的 retrieved_contexts 字段来源。
+    contexts: list[str]
+    # 人类排查用：看答案主要引用了哪些文件。
+    sources: list[str]
+    # 完整消息链，保留 ToolMessage / AIMessage 等调试信息。
+    messages: list
 
 
 # 这是给模型的系统提示词。
@@ -387,13 +447,47 @@ def rewrite_query_for_rag(
     return rewritten_query
 
 
-def build_direct_rag_prompt(
+def get_contexts_from_rag_results(results: list[RagSearchResult]) -> list[str]:
+    """
+    提取最终进入 Prompt 的知识片段文本，供 RAGAS 评估使用。
+
+    RAGAS 的很多指标都需要 retrieved_contexts：
+    - Faithfulness 会看回答是否能被这些上下文支持
+    - Context Recall 会看这些上下文是否覆盖参考答案需要的信息
+
+    注意这里取的是已经通过阈值和 Rerank 的结果，而不是向量库原始召回结果。
+    这样评估对象才和模型实际看到的上下文一致。
+    """
+    contexts: list[str] = []
+    for result in results:
+        if result.passed_threshold:
+            contexts.append(result.document.page_content)
+    return contexts
+
+
+def get_sources_from_rag_results(results: list[RagSearchResult]) -> list[str]:
+    """
+    提取最终进入 Prompt 的来源文件名。
+
+    sources 不是 RAGAS 的必需字段，但它非常适合人工排查：
+    - 如果回答错了，可以先看是不是召回了错误来源
+    - 如果分数下降，可以对比前后两次结果引用的文件是否变化
+    """
+    sources: list[str] = []
+    for result in results:
+        source = result.document.metadata.get("source")
+        if source and source not in sources:
+            sources.append(str(source))
+    return sources
+
+
+def build_direct_rag_payload(
     user_question: str,
     *,
     conversation_messages: list | None = None,
     rewrite_model: ChatOpenAI | None = None,
     max_results: int = DIRECT_RAG_MAX_RESULTS,
-) -> str:
+) -> DirectRagPayload:
     """
     构建“直接 Prompt 版 RAG”的用户消息。
 
@@ -422,19 +516,38 @@ def build_direct_rag_prompt(
     - 向量库先召回更多候选
     - 规则版 Rerank 重新排序
     - 只把重排后的 Top N 放进 Prompt
+
+    为什么新增 payload 版本：
+    原来的 build_direct_rag_prompt(...) 只返回字符串，CLI 很够用。
+    但 RAGAS 评估需要知道“模型回答时看到了哪些 contexts”，
+    所以这里把检索 query、检索结果、格式化上下文一起返回。
     """
     question = clean_user_text(user_question)
     if not question:
-        return user_question
+        # 空问题不触发检索，也不构造复杂 Prompt。
+        # 这个分支主要是防御式处理，正常 CLI 入口已经拦截了空输入。
+        return DirectRagPayload(
+            original_question=user_question,
+            retrieval_query=user_question,
+            prompt=user_question,
+            retrieved_context="",
+            results=[],
+            accepted_candidate_count=0,
+        )
 
     retrieval_query = question
     if rewrite_model is not None:
+        # Query Rewrite 只改变“检索用的问题”，不改变用户真正问的问题。
+        # 这样可以解决“它和微调有什么区别？”这类多轮指代问题，
+        # 同时最终回答仍然围绕用户原话展开。
         retrieval_query = rewrite_query_for_rag(
             user_question=question,
             conversation_messages=conversation_messages or [],
             model=rewrite_model,
         )
 
+    # 第一阶段多召回一些候选，第二阶段再 Rerank 选 Top N。
+    # 这里用 max(...) 是为了避免用户把候选数配得比最终结果数还小。
     retrieval_candidate_count = max(
         get_rag_retrieval_candidate_count(),
         max_results,
@@ -516,7 +629,104 @@ def build_direct_rag_prompt(
         "直接 Prompt RAG: 即将发送给模型的本轮 Prompt 如下\n%s",
         prompt,
     )
-    return prompt
+    return DirectRagPayload(
+        original_question=question,
+        retrieval_query=retrieval_query,
+        prompt=prompt,
+        retrieved_context=retrieved_context,
+        results=results,
+        accepted_candidate_count=accepted_count,
+    )
+
+
+def build_direct_rag_prompt(
+    user_question: str,
+    *,
+    conversation_messages: list | None = None,
+    rewrite_model: ChatOpenAI | None = None,
+    max_results: int = DIRECT_RAG_MAX_RESULTS,
+) -> str:
+    """
+    构建“直接 Prompt 版 RAG”的用户消息。
+
+    这是为了兼容原有 CLI 代码保留的轻量接口。
+    真正的检索细节都在 build_direct_rag_payload(...) 里；
+    CLI 只需要 prompt 字符串，所以这里取 payload.prompt 返回。
+    """
+    payload = build_direct_rag_payload(
+        user_question,
+        conversation_messages=conversation_messages,
+        rewrite_model=rewrite_model,
+        max_results=max_results,
+    )
+    return payload.prompt
+
+
+def run_rag_once(
+    question: str,
+    *,
+    agent=None,
+    rewrite_model: ChatOpenAI | None = None,
+    conversation_messages: list | None = None,
+) -> RagAnswer:
+    """
+    执行单轮 RAG 问答。
+
+    这个函数把 CLI 中的核心链路抽出来，方便 RAGAS 批量评估复用。
+
+    它和 main() 里的交互循环相比，有两个关键区别：
+    - 它只跑一轮，不进入 input(...) 循环
+    - 它会把回答、contexts、sources 一起返回，而不只是 print 到终端
+
+    这样 evals/run_ragas_eval.py 就可以批量调用它，把当前项目真实输出
+    转成 RAGAS 需要的评估样本。
+    """
+    # 批量评估时可以从外面传入同一个 agent / rewrite_model 重复使用。
+    # 如果外面没传，这里也能自己构建，方便单独调试 run_rag_once(...)。
+    active_agent = agent or build_agent()
+    active_rewrite_model = rewrite_model or build_model()
+
+    # 复制一份历史消息，避免调用方传入的 conversation_messages 被原地修改。
+    # 当前 RAGAS 脚本默认是单轮评估，所以这里通常是空列表；
+    # 但保留这个参数，后面要评估多轮指代问题时会很有用。
+    messages = list(conversation_messages or [])
+    payload = build_direct_rag_payload(
+        question,
+        conversation_messages=messages,
+        rewrite_model=active_rewrite_model,
+    )
+
+    # 和 CLI 主流程保持一致：真正传给 agent 的不是原始问题，
+    # 而是包含“检索上下文 + 回答规则 + 用户问题”的增强 Prompt。
+    messages.append({"role": "user", "content": payload.prompt})
+    result = active_agent.invoke({"messages": messages})
+    updated_messages = result.get("messages", [])
+    if not updated_messages:
+        # 正常情况下 LangChain 会返回 messages。
+        # 这个分支是兜底：即使返回结构异常，也尽量把结果转成可读文本。
+        answer = format_message_content(result)
+        return RagAnswer(
+            question=question,
+            answer=answer,
+            retrieval_query=payload.retrieval_query,
+            contexts=get_contexts_from_rag_results(payload.results),
+            sources=get_sources_from_rag_results(payload.results),
+            messages=messages,
+        )
+
+    # 对普通文本模式来说，最后一条消息通常就是模型最终回答。
+    # 如果中间发生工具调用，updated_messages 里会包含 AIMessage / ToolMessage；
+    # 最后一条仍然是工具调用后的最终 AIMessage。
+    final_message = updated_messages[-1]
+    answer = format_message_content(getattr(final_message, "content", final_message))
+    return RagAnswer(
+        question=question,
+        answer=answer,
+        retrieval_query=payload.retrieval_query,
+        contexts=get_contexts_from_rag_results(payload.results),
+        sources=get_sources_from_rag_results(payload.results),
+        messages=updated_messages,
+    )
 
 
 def print_new_tool_messages(new_messages: list) -> None:

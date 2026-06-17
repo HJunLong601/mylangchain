@@ -3,3 +3,5 @@ __pycache__/
 .env
 .idea
 .rag_chroma/
+./langgraph_agent_workspace/
+evals/*_results.csv

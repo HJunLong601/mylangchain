@@ -54,6 +54,8 @@ RAG_RETRIEVAL_CANDIDATES=8
 RAG_RERANK_ENABLED=true
 RAG_QUERY_REWRITE_ENABLED=true
 RAG_REWRITE_HISTORY_MESSAGES=6
+RAGAS_EVAL_DATASET=evals/ragas_dataset.jsonl
+RAGAS_EVAL_OUTPUT=evals/ragas_results.csv
 ```
 
 如果你后面想切到其他兼容 OpenAI API 的模型，也可以继续使用：
@@ -93,7 +95,37 @@ python -m app.main
 - `/json 读取 notes.txt 后帮我生成三个学习建议`
 - `先读 notes.txt，再告诉我下一步应该学什么`
 
-## 5. 这个项目里有什么
+## 5. 运行 RAGAS 评估
+
+这个项目现在带了一个最小 RAGAS 评估入口，用来观察当前 RAG 链路的回答是否忠于检索上下文、上下文是否覆盖参考答案。
+
+先确认已经安装依赖：
+
+```powershell
+pip install -r requirements.txt
+```
+
+然后运行：
+
+```powershell
+python evals/run_ragas_eval.py
+```
+
+如果只想快速试一条：
+
+```powershell
+python evals/run_ragas_eval.py --limit 1
+```
+
+默认评估集在 `evals/ragas_dataset.jsonl`，结果会保存到 `evals/ragas_results.csv`。你可以继续往 JSONL 里追加样本，每一行包含：
+
+```json
+{"user_input": "你的问题", "reference": "人工参考答案"}
+```
+
+当前脚本会先调用本项目真实的 RAG 流程生成 `response` 和 `retrieved_contexts`，再交给 RAGAS 计算 `faithfulness`、`context_recall` 和 `factual_correctness`。
+
+## 6. 这个项目里有什么
 
 `app/tools.py` 里现在放了五个工具，其中前四个默认注册给 agent 使用：
 
@@ -113,6 +145,7 @@ python -m app.main
 检索时会打印每个 chunk 的 `distance` 和 `relevance_score`，并用 `RAG_MAX_DISTANCE` 过滤低相关结果。`distance` 越小越相关，超过阈值的 chunk 不会进入 Prompt。
 检索前还会执行 Query Rewrite：程序会参考最近几条历史，把“它和微调有什么区别？”这类上下文问题改写成更适合检索的独立问题，例如“RAG 和微调有什么区别？”。
 检索后会执行教学版 Rerank：向量库先按 `RAG_RETRIEVAL_CANDIDATES` 多召回候选，再根据 `relevance_score`、关键词命中和长度惩罚重新排序，最后只把重排后的 Top 3 放进 Prompt。
+RAGAS 评估入口会复用 `app/main.py` 里的单轮 RAG 函数，不会另起一套检索逻辑。
 
 如果你想看“新建一个工具应该怎么写”，可以直接打开：
 
@@ -124,7 +157,7 @@ python -m app.main
 - 一个无参工具示例 `read_todo_list()`
 - 一个带参工具示例 `get_weather_example()`
 
-## 6. 你接下来可以怎么学
+## 7. 你接下来可以怎么学
 
 建议按这个顺序继续扩展：
 
@@ -133,9 +166,10 @@ python -m app.main
 3. 看懂 `app/rag.py` 里“文档加载 -> 切分 -> embedding -> Chroma 持久化向量库 -> 带分数检索 -> 阈值过滤 -> 重排序”的 RAG 流程
 4. 自己新增知识文件，观察 `distance`、`relevance_score` 和 `rerank_score` 怎么变化
 5. 调整 `RAG_MAX_DISTANCE` 和 `RAG_RETRIEVAL_CANDIDATES`，观察哪些 chunk 会进入 Prompt
-6. 再进入更正式的 reranker 模型 / 生产向量数据库 / LangGraph
+6. 用 `evals/ragas_dataset.jsonl` 固定一组问题，观察调参前后的 RAGAS 分数变化
+7. 再进入更正式的 reranker 模型 / 生产向量数据库 / LangGraph
 
-## 7. 常见问题
+## 8. 常见问题
 
 ### 启动时报缺少 API Key
 
