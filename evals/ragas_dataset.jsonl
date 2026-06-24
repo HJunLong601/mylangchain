@@ -1,0 +1,4 @@
+{"user_input": "RAG 是什么？", "reference": "RAG 是 Retrieval-Augmented Generation，也就是检索增强生成。它通常先从知识库检索和问题相关的内容，再把检索结果交给模型生成答案。", "reference_context_ids": ["langchain_rag.md#chunk-1"]}
+{"user_input": "为什么需要 RAG？", "reference": "需要 RAG 是因为模型本身不知道本地文档、团队知识和业务资料。RAG 可以把自己的知识检索出来并补进上下文，让模型基于这些资料回答。", "reference_context_ids": ["langchain_rag.md#chunk-1"]}
+{"user_input": "一个最小 RAG 系统通常包含哪些部分？", "reference": "一个最小 RAG 系统通常包含文档加载、文本切分、检索和生成。文档加载读取资料，文本切分把长文拆成小块，检索找到相关片段，生成阶段让模型基于片段组织答案。", "reference_context_ids": ["langchain_rag.md#chunk-1", "langchain_rag.md#chunk-2"]}
+{"user_input": "RAG 和微调有什么区别？", "reference": "RAG 不等于微调。RAG 是在回答时检索证据片段并交给模型生成答案；检索系统负责找资料，模型负责总结和表达。", "reference_context_ids": ["langchain_rag.md#chunk-2"]}

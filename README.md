@@ -56,6 +56,11 @@ RAG_QUERY_REWRITE_ENABLED=true
 RAG_REWRITE_HISTORY_MESSAGES=6
 RAGAS_EVAL_DATASET=evals/ragas_dataset.jsonl
 RAGAS_EVAL_OUTPUT=evals/ragas_results.csv
+RAGAS_RETRIEVAL_OUTPUT=evals/retrieval_results.csv
+RAGAS_TIMEOUT_SECONDS=300
+RAGAS_MAX_WORKERS=4
+RAGAS_MIN_ID_RECALL=0.8
+RAGAS_MIN_ID_PRECISION=0.5
 ```
 
 如果你后面想切到其他兼容 OpenAI API 的模型，也可以继续使用：
@@ -105,10 +110,12 @@ python -m app.main
 pip install -r requirements.txt
 ```
 
-然后运行：
+依赖里特意把 `openai` 锁在 `1.x`、把 `instructor` 锁在 `1.10.x`：当前环境里的 `tradingagents` 依赖 `openai<2.0.0`，而较新的 `instructor` 会要求 `openai>=2.0.0`。这个组合已经通过 `pip check` 验证，可以同时满足 RAGAS、LangChain 和现有环境。
+
+然后运行完整评估：
 
 ```powershell
-python evals/run_ragas_eval.py
+python evals/run_ragas_eval.py --mode all
 ```
 
 如果只想快速试一条：
@@ -117,13 +124,25 @@ python evals/run_ragas_eval.py
 python evals/run_ragas_eval.py --limit 1
 ```
 
-默认评估集在 `evals/ragas_dataset.jsonl`，结果会保存到 `evals/ragas_results.csv`。你可以继续往 JSONL 里追加样本，每一行包含：
+如果只想看召回，不想生成最终回答和跑 RAGAS 模型裁判：
 
-```json
-{"user_input": "你的问题", "reference": "人工参考答案"}
+```powershell
+python evals/run_ragas_eval.py --mode retrieval
 ```
 
-当前脚本会先调用本项目真实的 RAG 流程生成 `response` 和 `retrieved_contexts`，再交给 RAGAS 计算 `faithfulness`、`context_recall` 和 `factual_correctness`。
+默认评估集在 `evals/ragas_dataset.jsonl`。完整 RAGAS 结果会保存到 `evals/ragas_results.csv`，召回报告会保存到 `evals/retrieval_results.csv`。
+
+你可以继续往 JSONL 里追加样本，每一行包含：
+
+```json
+{"user_input": "你的问题", "reference": "人工参考答案", "reference_context_ids": ["langchain_rag.md#chunk-1"]}
+```
+
+其中 `reference_context_ids` 是可选字段，用来做不依赖模型裁判的 ID 级召回检查。当前 chunk id 格式是 `来源文件名#chunk-编号`，例如 `langchain_rag.md#chunk-1`。
+
+当前脚本会先调用本项目真实的 RAG 流程生成 `response`、`retrieved_contexts` 和 `retrieved_context_ids`，再交给 RAGAS 计算 `faithfulness`、`context_recall`、`llm_context_precision_with_reference`、`factual_correctness`；如果样本提供了 `reference_context_ids`，还会计算 `id_based_context_recall` 和 `id_based_context_precision`。
+`--mode retrieval` 也会调用 RAGAS 的 ID-based 指标，并在召回报告里写入 `ragas_id_based_context_recall`、`ragas_id_based_context_precision`、`has_retrieval_warning` 和 `retrieval_warning`。如果分数低于 `RAGAS_MIN_ID_RECALL` 或 `RAGAS_MIN_ID_PRECISION`，报告里会直接提示“召回率过低 / 召回精度过低 / 漏召回参考 chunk”。
+如果兼容接口响应较慢，可以调大 `RAGAS_TIMEOUT_SECONDS`；如果接口容易限流，可以调小 `RAGAS_MAX_WORKERS`。
 
 ## 6. 这个项目里有什么
 
@@ -146,6 +165,7 @@ python evals/run_ragas_eval.py --limit 1
 检索前还会执行 Query Rewrite：程序会参考最近几条历史，把“它和微调有什么区别？”这类上下文问题改写成更适合检索的独立问题，例如“RAG 和微调有什么区别？”。
 检索后会执行教学版 Rerank：向量库先按 `RAG_RETRIEVAL_CANDIDATES` 多召回候选，再根据 `relevance_score`、关键词命中和长度惩罚重新排序，最后只把重排后的 Top 3 放进 Prompt。
 RAGAS 评估入口会复用 `app/main.py` 里的单轮 RAG 函数，不会另起一套检索逻辑。
+召回报告会记录每个问题的 `retrieval_query`、`retrieved_context_ids`、`reference_context_ids`、命中的 `hit_context_ids`，以及 ID 级 `id_recall` / `id_precision`，方便你调检索阈值和候选数量。
 
 如果你想看“新建一个工具应该怎么写”，可以直接打开：
 

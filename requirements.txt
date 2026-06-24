@@ -1,7 +1,18 @@
 langchain>=1.0.0
 langchain-openai>=1.0.0
 langchain-chroma>=1.0.0
-ragas>=0.4.0
+
+# RAGAS 0.4.x 还能继续使用当前评估脚本里的 LangChain LLM wrapper；
+# 先锁在 0.4 系列，避免后续大版本调整指标 API 时让评估脚本漂移。
+ragas>=0.4.3,<0.5.0
+
+# 当前项目环境里还存在 tradingagents，它要求 openai<2.0.0。
+# 较新的 instructor 版本又要求 openai>=2.0.0，所以这里把两者一起锁住：
+# - openai 保持 1.x，兼容 tradingagents / langchain-openai / ragas
+# - instructor 保持 1.10.x，这是已验证可与 openai 1.x 共存的版本
+openai>=1.109.1,<2.0.0
+instructor>=1.10.0,<1.11.0
+
 python-dotenv>=1.1.0
 pydantic>=2.7.4
 numpy>=2.0.0

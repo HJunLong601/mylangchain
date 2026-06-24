@@ -100,6 +100,8 @@ class RagAnswer:
     retrieval_query: str
     # RAGAS 的 retrieved_contexts 字段来源。
     contexts: list[str]
+    # RAGAS 的 retrieved_context_ids 字段来源，用来做 ID 级召回评估。
+    context_ids: list[str]
     # 人类排查用：看答案主要引用了哪些文件。
     sources: list[str]
     # 完整消息链，保留 ToolMessage / AIMessage 等调试信息。
@@ -465,6 +467,41 @@ def get_contexts_from_rag_results(results: list[RagSearchResult]) -> list[str]:
     return contexts
 
 
+def get_context_id_from_rag_result(result: RagSearchResult) -> str:
+    """
+    为一个检索结果生成稳定的 chunk id。
+
+    RAGAS 的 IDBasedContextRecall / IDBasedContextPrecision 不看文本语义，
+    只看“检索回来的 context id 是否命中参考 context id”。
+
+    当前项目里每个 chunk 的来源信息来自 Document.metadata：
+    - source: 文件名，例如 langchain_rag.md
+    - chunk_index: 切分后的编号，例如 1、2、3
+
+    所以这里把它们组合成稳定 id：langchain_rag.md#chunk-1。
+    后续你在 evals/ragas_dataset.jsonl 里写 reference_context_ids 时，
+    就可以直接使用这个格式。
+    """
+    source = result.document.metadata.get("source", "unknown")
+    chunk_index = result.document.metadata.get("chunk_index", "?")
+    return f"{source}#chunk-{chunk_index}"
+
+
+def get_context_ids_from_rag_results(results: list[RagSearchResult]) -> list[str]:
+    """
+    提取最终进入 Prompt 的 chunk id。
+
+    这和 get_contexts_from_rag_results(...) 是一一对应的：
+    - contexts[i] 是模型看到的第 i 个证据片段文本
+    - context_ids[i] 是这个证据片段的稳定身份
+    """
+    context_ids: list[str] = []
+    for result in results:
+        if result.passed_threshold:
+            context_ids.append(get_context_id_from_rag_result(result))
+    return context_ids
+
+
 def get_sources_from_rag_results(results: list[RagSearchResult]) -> list[str]:
     """
     提取最终进入 Prompt 的来源文件名。
@@ -710,6 +747,7 @@ def run_rag_once(
             answer=answer,
             retrieval_query=payload.retrieval_query,
             contexts=get_contexts_from_rag_results(payload.results),
+            context_ids=get_context_ids_from_rag_results(payload.results),
             sources=get_sources_from_rag_results(payload.results),
             messages=messages,
         )
@@ -724,6 +762,7 @@ def run_rag_once(
         answer=answer,
         retrieval_query=payload.retrieval_query,
         contexts=get_contexts_from_rag_results(payload.results),
+        context_ids=get_context_ids_from_rag_results(payload.results),
         sources=get_sources_from_rag_results(payload.results),
         messages=updated_messages,
     )
